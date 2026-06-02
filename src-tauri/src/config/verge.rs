@@ -257,6 +257,41 @@ pub struct IVerge {
 
     /// 启用外部控制器
     pub enable_external_controller: Option<bool>,
+
+    /// 专线代理配置（基于链式代理 dialer-proxy 的简化封装）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedicated_line: Option<DedicatedLineConfig>,
+}
+
+/// 专线代理配置
+///
+/// 本质是固定两段的链式代理：`[entry_node(入口) → name(专线出口)]`。
+/// `enabled=true` 时，配置生成管线（enhance）会把该出口节点注入 proxies、
+/// 加入目标组、并设置 `dialer-proxy = entry_node`，从而重启后自动保持。
+#[derive(Default, Debug, Clone, Deserialize, Serialize)]
+pub struct DedicatedLineConfig {
+    /// 是否已"连接专线"
+    pub enabled: Option<bool>,
+    /// 注入到 proxies 的出口节点名，固定如 "专线出口"
+    pub name: Option<String>,
+    /// 协议类型：socks5 | http
+    pub proxy_type: Option<String>,
+    /// 专线服务器 IP
+    pub server: Option<String>,
+    /// 端口
+    pub port: Option<u16>,
+    /// 用户名（可选）
+    pub username: Option<String>,
+    /// 密码（可选）
+    pub password: Option<String>,
+    /// 连接时记录的入口节点（当时组里选中的节点）
+    pub entry_node: Option<String>,
+    /// 作用的代理组（GLOBAL 或规则模式下选中的组）
+    pub group: Option<String>,
+    /// 是否启用 UDP
+    pub udp: Option<bool>,
+    /// 跳过证书校验（http/tls 类）
+    pub skip_cert_verify: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
@@ -554,6 +589,7 @@ impl IVerge {
         patch!(enable_dns_settings);
         patch!(home_cards);
         patch!(enable_external_controller);
+        patch!(dedicated_line);
     }
 
     pub const fn get_singleton_port() -> u16 {

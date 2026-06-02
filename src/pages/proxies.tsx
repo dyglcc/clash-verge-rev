@@ -170,21 +170,24 @@ const ProxyPage = () => {
             ))}
           </ButtonGroup>
 
-          <Button
-            size="small"
-            variant={isChainMode ? 'contained' : 'outlined'}
-            onClick={onToggleChainMode}
-            sx={{ ml: 1 }}
-            startIcon={
-              isChainMode ? (
-                <LanRounded fontSize="small" />
-              ) : (
-                <LanOutlined fontSize="small" />
-              )
-            }
-          >
-            {t('proxies.page.actions.toggleChain')}
-          </Button>
+          {/* 专线代理连接时隐藏链式代理按钮，避免两者冲突 */}
+          {!verge?.dedicated_line?.enabled && (
+            <Button
+              size="small"
+              variant={isChainMode ? 'contained' : 'outlined'}
+              onClick={onToggleChainMode}
+              sx={{ ml: 1 }}
+              startIcon={
+                isChainMode ? (
+                  <LanRounded fontSize="small" />
+                ) : (
+                  <LanOutlined fontSize="small" />
+                )
+              }
+            >
+              {t('proxies.page.actions.toggleChain')}
+            </Button>
+          )}
         </Box>
       }
     >

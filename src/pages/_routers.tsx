@@ -1,3 +1,4 @@
+import CableRoundedIcon from '@mui/icons-material/CableRounded'
 import DnsRoundedIcon from '@mui/icons-material/DnsRounded'
 import ForkRightRoundedIcon from '@mui/icons-material/ForkRightRounded'
 import HomeRoundedIcon from '@mui/icons-material/HomeRounded'
@@ -19,6 +20,7 @@ import UnlockSvg from '@/assets/image/itemicon/unlock.svg?react'
 
 import Layout from './_layout'
 import ConnectionsPage from './connections'
+import DedicatedLinePage from './dedicated-line'
 import HomePage from './home'
 import ProfilesPage from './profiles'
 import ProxiesPage from './proxies'
@@ -38,6 +40,12 @@ export const navItems = [
     path: '/proxies',
     icon: [<WifiRoundedIcon key="mui" />, <ProxiesSvg key="svg" />],
     Component: ProxiesPage,
+  },
+  {
+    label: '专线代理',
+    path: '/dedicated-line',
+    icon: [<CableRoundedIcon key="mui" />, <CableRoundedIcon key="svg" />],
+    Component: DedicatedLinePage,
   },
   {
     label: 'layout.components.navigation.tabs.profiles',

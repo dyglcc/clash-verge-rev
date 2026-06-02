@@ -145,6 +145,10 @@ fn determine_update_flags(patch: &IVerge) -> UpdateFlags {
     if tun_mode.is_some() {
         update_flags.insert(UpdateFlags::CLASH_CONFIG | UpdateFlags::GROUP_SYS_TRAY);
     }
+    // 专线代理变更：重新生成核心配置（enhance 中按 enabled 注入/移除专线出口）
+    if patch.dedicated_line.is_some() {
+        update_flags.insert(UpdateFlags::CLASH_CONFIG);
+    }
     if enable_global_hotkey.is_some() || home_cards.is_some() {
         update_flags.insert(UpdateFlags::VERGE_CONFIG);
     }

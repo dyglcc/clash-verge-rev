@@ -114,6 +114,34 @@ export async function updateProxyChainConfigInRuntime(proxyChainConfig: any) {
   })
 }
 
+// ============ 专线代理（Dedicated Line）============
+
+export interface DedicatedLineConfig {
+  enabled?: boolean
+  name?: string
+  proxy_type?: string // socks5 | http
+  server?: string
+  port?: number
+  username?: string
+  password?: string
+  entry_node?: string // 连接时记录的入口节点
+  group?: string // 作用的代理组（GLOBAL 或规则模式下选中的组）
+  udp?: boolean
+  skip_cert_verify?: boolean
+}
+
+export async function getDedicatedLine() {
+  return invoke<DedicatedLineConfig | null>('get_dedicated_line')
+}
+
+export async function patchDedicatedLine(config: DedicatedLineConfig) {
+  return invoke<void>('patch_dedicated_line', { config })
+}
+
+export async function verifyDedicatedLineIp() {
+  return invoke<string>('verify_dedicated_line_ip')
+}
+
 export async function patchClashConfig(payload: Partial<IConfigData>) {
   return invoke<void>('patch_clash_config', { payload })
 }

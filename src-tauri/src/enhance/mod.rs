@@ -1,4 +1,5 @@
 mod chain;
+mod dedicated_line;
 pub mod field;
 mod merge;
 mod script;
@@ -7,6 +8,7 @@ mod tun;
 
 use self::{
     chain::{AsyncChainItemFrom as _, ChainItem, ChainType},
+    dedicated_line::apply_dedicated_line,
     field::{use_keys, use_lowercase, use_sort},
     merge::use_merge,
     script::use_script,
@@ -649,6 +651,9 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
 
     // dns settings
     config = apply_dns_settings(config, enable_dns_settings).await;
+
+    // 专线代理：若已启用，注入出口节点 + dialer-proxy（重启后自动保持）
+    config = apply_dedicated_line(config).await;
 
     let mut exists_keys_set = HashSet::new();
     exists_keys_set.extend(exists_keys);

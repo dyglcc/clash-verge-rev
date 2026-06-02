@@ -984,6 +984,19 @@ interface IVergeConfig {
   enable_hover_jump_navigator?: boolean
   hover_jump_navigator_delay?: number
   enable_external_controller?: boolean
+  dedicated_line?: {
+    enabled?: boolean
+    name?: string
+    proxy_type?: string
+    server?: string
+    port?: number
+    username?: string
+    password?: string
+    entry_node?: string
+    group?: string
+    udp?: boolean
+    skip_cert_verify?: boolean
+  }
 }
 
 interface IWebDavFile {
