@@ -1,10 +1,9 @@
 name: Auto Build
 
 on:
+  # 已移除定时(schedule)触发：避免 dev 分支被自动编译并覆盖专线版的 release 产物。
+  # 需要构建时改用手动触发（Actions 页 Run workflow，或 gh workflow run）。
   workflow_dispatch:
-  schedule:
-    # UTC+8 12:00, 18:00 -> UTC 4:00, 10:00
-    - cron: '0 4,10 * * *'
 permissions: write-all
 env:
   TAG_NAME: autobuild
