@@ -508,6 +508,8 @@ jobs:
 
   notify-telegram:
     name: Notify Telegram
+    # 仅官方仓库发送 TG 通知；fork 无 TELEGRAM_BOT_TOKEN，自动跳过避免失败
+    if: github.repository == 'clash-verge-rev/clash-verge-rev'
     runs-on: ubuntu-latest
     needs:
       [
