@@ -128,9 +128,9 @@ jobs:
       - name: Check dedicated line compatibility
         if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
         run: |
-          pnpm typecheck
-          pnpm exec vitest run src/services/dedicated-line.test.ts
-          cargo test --locked -p clash-verge --lib dedicated_line
+          pnpm web:build
+          pnpm test
+          cargo test --locked --release -p clash-verge --lib dedicated_line
 
       - name: Add Rust Target
         if: github.event.inputs[matrix.input] == 'true'
