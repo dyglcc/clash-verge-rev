@@ -12,7 +12,7 @@ M5 uses the existing Apple Silicon target, `aarch64-apple-darwin`. The developme
 
 This fork uses explicit ad-hoc signing (`signingIdentity: "-"`). It has no Developer ID distribution identity or notarization in the development workflow. Therefore a browser-downloaded artifact may still be blocked by Gatekeeper even when architecture and signature integrity checks pass.
 
-For the user's own trusted build, copy the app from the DMG into Applications. If macOS blocks it, first use System Settings → Privacy & Security → Open Anyway. If the app specifically reports “damaged,” verify its integrity and quarantine status in Terminal:
+For the user's own trusted build, fully quit the old Clash Verge from its tray menu before replacing it, then copy the app from the DMG into Applications. Upstream's [macOS FAQ](https://www.clashverge.dev/faq/macos.html) also identifies replacing a running installation as a possible source of package damage. If macOS blocks the trusted app, first use System Settings → Privacy & Security → Open Anyway. If the app specifically reports “damaged,” verify its integrity and quarantine status in Terminal:
 
 ```sh
 file "/Applications/Clash Verge.app/Contents/MacOS/clash-verge"
@@ -33,6 +33,20 @@ After installing on the M5, the remaining hardware-dependent acceptance is launc
 
 ## Validation on 2026-10-17
 
-TypeScript type checking, the production frontend build, full frontend ESLint, Biome formatting and the architecture gates passed. Vitest passed all 47 tests across 12 files. On Windows, `cargo check --locked -p clash-verge --tests --features clippy`, `cargo fmt --all -- --check`, and `cargo clippy --offline --locked -p clash-verge --tests --features clippy -- -D warnings` passed with Rust 1.99.0. `cargo test --offline --locked -p clash-verge --features clippy --lib dedicated_line` passed all three dedicated-line backend tests. Knip reports the pre-existing unused `readLegacyTestUrls` export in `src/services/proxy-test-url.ts`; that file is unchanged from upstream `v2.5.8`. macOS bundle results will be recorded after the build completes.
+TypeScript type checking, the production frontend build, full frontend ESLint, Biome formatting and the architecture gates passed. Vitest passed all 47 tests across 12 files. On Windows, `cargo check --locked -p clash-verge --tests --features clippy`, `cargo fmt --all -- --check`, and `cargo clippy --offline --locked -p clash-verge --tests --features clippy -- -D warnings` passed with Rust 1.99.0. `cargo test --offline --locked -p clash-verge --features clippy --lib dedicated_line` passed all three dedicated-line backend tests. Knip reports the pre-existing unused `readLegacyTestUrls` export in `src/services/proxy-test-url.ts`; that file is unchanged from upstream `v2.5.8`.
+
+The local build assets were refreshed successfully with `prebuild x86_64-pc-windows-msvc --force`. Both Mihomo `v1.19.32` and `alpha-94b13ae` accepted SOCKS5 and HTTP exit configurations containing `dialer-proxy: entry`, using their actual `-t` configuration checker. These checks do not connect to a real dedicated server.
+
+The [macOS build](https://github.com/dyglcc/clash-verge-rev/actions/runs/39041740672) used source commit `2555cbfda3952e818a2adddfc90924bd117369d6`. Its production build, final-DMG ARM64/signature verification, bundled-core startup checks and artifact upload all passed. The native dedicated-line tests and all 47 frontend tests also passed on the Apple Silicon runner. Download the DMG and checksum together from the [macos-aarch64 artifact](https://github.com/dyglcc/clash-verge-rev/actions/runs/39041740672/artifacts/12104473455); GitHub currently retains this artifact until 2027-01-15. The artifact is a deploy-test build of this fork, with the source revision in its version string.
+
+The final package contains seven verified ARM64 Mach-O executables, including the main app, frontend-contract helper, both Mihomo cores and three service executables. Both packaged cores (`v1.19.32` and `alpha-94b13ae`) executed successfully. The downloaded DMG was independently hashed on Windows and matched both the CI log and its `.sha256` file:
+
+```text
+Clash Verge_2.5.8+deploytest.1017.2555cbf_aarch64.dmg
+80,611,979 bytes
+SHA-256: e82432857c8bdc3465a9e68e5845468dea7b7e57b9cf56b1d79f3c089cb05770
+```
+
+On the Mac, compare `shasum -a 256` for the downloaded DMG with this value before installation.
 
 The inherited updater endpoints still point at official upstream releases. Installing a future official update would replace the custom dedicated-line build; keep using this fork's builds while this feature is needed.

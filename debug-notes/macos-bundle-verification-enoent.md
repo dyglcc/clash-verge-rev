@@ -11,3 +11,5 @@
 | The working directory is wrong | Compare absolute paths in the error and bundler output | Both resolve under the same checked-out workspace | Excluded |
 
 The verifier now mounts the final DMG read-only, verifies the app inside, executes the two bundled cores and writes a SHA-256 sidecar. A small signed fixture DMG exercises this path before native compilation. The workflow retains produced DMGs and Rust caches on failure for diagnosis. The native test and app build now share an explicit target directory to avoid compiling their dependencies twice. These corrections do not change application runtime code.
+
+Confirmed in [run 39041740672](https://github.com/dyglcc/clash-verge-rev/actions/runs/39041740672): both the signed fixture DMG and the real production DMG passed verification, and the installer/checksum artifact was uploaded successfully.
