@@ -3,8 +3,8 @@ name: Auto Build
 on:
   workflow_dispatch:
   schedule:
-    # UTC+8 12:00, 18:00 -> UTC 4:00, 10:00
-    - cron: '0 4,10 * * *'
+    # UTC+8 06:00, 18:00 -> UTC 22:00, 10:00
+    - cron: '0 10,22 * * *'
 permissions: write-all
 env:
   TAG_NAME: autobuild
@@ -19,6 +19,7 @@ concurrency:
 jobs:
   check_commit:
     name: Check Commit Needs Build
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'clash-verge-rev/clash-verge-rev'
     uses: clash-verge-rev/clash-verge-rev/.github/workflows/check-commit-needs-build.yml@dev
     with:
       tag_name: autobuild
@@ -29,24 +30,29 @@ jobs:
     runs-on: ubuntu-latest
     needs: check_commit
     if: ${{ needs.check_commit.outputs.should_run == 'true' }}
+    outputs:
+      release_id: ${{ steps.upload_release.outputs.id }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+
+      - name: Group changelog platforms
+        run: bash ./scripts-workflow/group_platforms.sh
 
       - name: Fetch UPDATE logs
         id: fetch_update_logs
         run: bash ./scripts/extract_update_logs.sh
         shell: bash
 
-      - uses: pnpm/action-setup@v6.0.8
+      - uses: pnpm/action-setup@v6.1.0
         name: Install pnpm
         with:
           run_install: false
 
       - name: Install Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: '24.16.0'
+          node-version: '24.21.0'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -96,15 +102,17 @@ jobs:
           - [常见问题](https://clash-verge-rev.github.io/faq/windows.html)
 
           ### 稳定机场VPN推荐
-          - [狗狗加速](https://verge.dginv.click/#/register?code=oaxsAGo6)
+          - [狗狗加速](https://cvr.dginv.click/#/register?code=oaxsAGo6)
 
           Created at ${{ env.BUILDTIME }}.
           EOF
 
       - name: Upload Release
+        id: upload_release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG_NAME }}
+          target_commitish: ${{ github.sha }}
           name: 'Clash Verge Rev ${{ env.TAG_CHANNEL }}'
           body_path: release.txt
           prerelease: true
@@ -142,12 +150,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.95.0'
+          toolchain: '1.99.0'
           targets: ${{ matrix.target }}
 
       - name: Add Rust Target
@@ -170,28 +178,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Install x86 OpenSSL (macOS only)
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: |
-          arch -x86_64 brew install openssl@3
-          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> $GITHUB_ENV
-
-      - uses: pnpm/action-setup@v6.0.8
+      - uses: pnpm/action-setup@v6.1.0
         name: Install pnpm
         with:
           run_install: false
 
       - name: Install Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: '24.16.0'
+          node-version: '24.21.0'
           cache: 'pnpm'
 
       - name: Pnpm Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.pnpm-store
           key: 'pnpm-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
@@ -208,21 +207,21 @@ jobs:
 
       - name: Add Rust Target
         run: |
-          # Ensure cross target is installed for the pinned toolchain; fallback without explicit toolchain if needed
-          rustup target add ${{ matrix.target }} --toolchain 1.95.0 || rustup target add ${{ matrix.target }}
+          rustup target add ${{ matrix.target }} --toolchain 1.99.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
           echo "Rust target ${{ matrix.target }} installed."
 
       - name: Tauri build for Windows-macOS-Linux
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           NODE_OPTIONS: '--max_old_space_size=4096'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          # APPLE_* 环境变量已移除：fork 无苹果证书，空值会让 tauri 误以为"有证书要导入"而报错。
-          # 移除后 macOS 产出未签名（Apple 芯片为 ad-hoc 签名）的 .dmg，用户用 `xattr -cr` 即可打开。
+          # Fork builds use the ad-hoc identity from tauri.macos.conf.json.
+          # Developer ID signing and notarization are required for Gatekeeper-trusted distribution.
         with:
+          releaseId: ${{ needs.update_tag.outputs.release_id }}
           tagName: ${{ env.TAG_NAME }}
           releaseName: 'Clash Verge Rev ${{ env.TAG_CHANNEL }}'
           releaseBody: 'More new features are now supported.'
@@ -230,7 +229,10 @@ jobs:
           prerelease: true
           tauriScript: pnpm
           args: --target ${{ matrix.target }}
-          # includeUpdaterJson: true
+
+      - name: Verify Apple Silicon bundle
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: node scripts/verify-macos-bundle.mjs "target/${{ matrix.target }}/release/bundle/macos/Clash Verge.app" arm64
 
   autobuild-arm-linux:
     name: Autobuild ARM Linux
@@ -251,12 +253,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.95.0'
+          toolchain: '1.99.0'
           targets: ${{ matrix.target }}
 
       - name: Add Rust Target
@@ -274,18 +276,18 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6.0.8
+        uses: pnpm/action-setup@v6.1.0
         with:
           run_install: false
 
       - name: Install Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: '24.16.0'
+          node-version: '24.21.0'
           cache: 'pnpm'
 
       - name: Pnpm Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.pnpm-store
           key: 'pnpm-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
@@ -346,8 +348,7 @@ jobs:
 
       - name: Add Rust Target
         run: |
-          # Ensure cross target is installed for the pinned toolchain; fallback without explicit toolchain if needed
-          rustup target add ${{ matrix.target }} --toolchain 1.95.0 || rustup target add ${{ matrix.target }}
+          rustup target add ${{ matrix.target }} --toolchain 1.99.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
           echo "Rust target ${{ matrix.target }} installed."
 
@@ -402,7 +403,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Add Rust Target
         run: rustup target add ${{ matrix.target }}
@@ -419,18 +420,18 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6.0.8
+        uses: pnpm/action-setup@v6.1.0
         with:
           run_install: false
 
       - name: Install Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: '24.16.0'
+          node-version: '24.21.0'
           cache: 'pnpm'
 
       - name: Pnpm Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.pnpm-store
           key: 'pnpm-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
@@ -454,14 +455,13 @@ jobs:
 
       - name: Add Rust Target
         run: |
-          # Ensure cross target is installed for the pinned toolchain; fallback without explicit toolchain if needed
-          rustup target add ${{ matrix.target }} --toolchain 1.95.0 || rustup target add ${{ matrix.target }}
+          rustup target add ${{ matrix.target }} --toolchain 1.99.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
           echo "Rust target ${{ matrix.target }} installed."
 
       - name: Tauri build for Windows
         id: build
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           NODE_OPTIONS: '--max_old_space_size=4096'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -470,7 +470,6 @@ jobs:
         with:
           tauriScript: pnpm
           args: --target ${{ matrix.target }}
-          # includeUpdaterJson: true
 
       - name: Rename
         run: |
@@ -501,11 +500,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: target/${{ matrix.target }}/release/bundle/nsis/*setup*
 
-      - name: Portable Bundle
-        run: pnpm portable-fixed-webview2 ${{ matrix.target }} --${{ env.TAG_NAME }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   notify-telegram:
     name: Notify Telegram
     # 仅官方仓库发送 TG 通知；fork 无 TELEGRAM_BOT_TOKEN，自动跳过避免失败
@@ -520,7 +514,10 @@ jobs:
       ]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+
+      - name: Group changelog platforms
+        run: bash ./scripts-workflow/group_platforms.sh
 
       - name: Fetch UPDATE logs
         id: fetch_update_logs
@@ -528,11 +525,11 @@ jobs:
         shell: bash
 
       - name: Install Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: '24.16.0'
+          node-version: '24.21.0'
 
-      - uses: pnpm/action-setup@v6.0.8
+      - uses: pnpm/action-setup@v6.1.0
         name: Install pnpm
         with:
           run_install: false
@@ -586,7 +583,7 @@ jobs:
           - [常见问题](https://clash-verge-rev.github.io/faq/windows.html)
 
           ### 稳定机场VPN推荐
-          - [狗狗加速](https://verge.dginv.click/#/register?code=oaxsAGo6)
+          - [狗狗加速](https://cvr.dginv.click/#/register?code=oaxsAGo6)
 
           Created at ${{ env.BUILDTIME }}.
           EOF

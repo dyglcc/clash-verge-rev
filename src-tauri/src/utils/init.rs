@@ -1,4 +1,3 @@
-// #[cfg(not(feature = "tracing"))]
 use crate::{
     config::{Config, IClashTemp, IProfiles, IVerge},
     constants,
@@ -10,10 +9,10 @@ use crate::{
         help,
     },
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{Local, TimeZone as _};
 use clash_verge_logging::Type;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::path::Path;
 use std::{path::PathBuf, str::FromStr as _};
 use tauri_plugin_shell::ShellExt as _;
@@ -29,12 +28,19 @@ async fn delete_snapshot_logs(log_dir: &Path) -> Result<()> {
     ];
 
     for temp_dir in temp_dirs.iter().filter(|d| d.exists()) {
-        let mut entries = fs::read_dir(temp_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
+        let mut entries = fs::read_dir(temp_dir)
+            .await
+            .with_context(|| format!("failed to read log snapshot directory {}", temp_dir.display()))?;
+        while let Some(entry) = entries.next_entry().await.with_context(|| {
+            format!(
+                "failed to read next entry in log snapshot directory {}",
+                temp_dir.display()
+            )
+        })? {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("log") {
                 let _ = path.remove_if_exists().await;
-                logging!(info, Type::Setup, "delete snapshot log file: {}", path.display());
+                logging!(debug, Type::Setup, "delete snapshot log file: {}", path.display());
             }
         }
     }
@@ -43,15 +49,18 @@ async fn delete_snapshot_logs(log_dir: &Path) -> Result<()> {
 }
 
 // TODO flexi_logger 提供了最大保留天数，或许我们应该用内置删除log文件
-/// 删除log文件
 pub async fn delete_log() -> Result<()> {
     let log_dir = dirs::app_logs_dir()?;
-    if !log_dir.exists() {
+    let service_log_dir = dirs::service_log_dir()?;
+
+    if !log_dir.exists() && !service_log_dir.exists() {
         return Ok(());
     }
 
     #[cfg(target_os = "windows")]
-    delete_snapshot_logs(&log_dir).await?;
+    if log_dir.exists() {
+        delete_snapshot_logs(&log_dir).await?;
+    }
 
     let auto_log_clean = {
         let verge = Config::verge().await;
@@ -59,7 +68,6 @@ pub async fn delete_log() -> Result<()> {
         verge.auto_log_clean.unwrap_or(0)
     };
 
-    // 1: 1天, 2: 7天, 3: 30天, 4: 90天
     let day = match auto_log_clean {
         1 => 1,
         2 => 7,
@@ -68,9 +76,8 @@ pub async fn delete_log() -> Result<()> {
         _ => return Ok(()),
     };
 
-    logging!(info, Type::Setup, "try to delete log files, day: {}", day);
+    logging!(debug, Type::Setup, "try to delete log files, day: {}", day);
 
-    // %Y-%m-%d to NaiveDateTime
     let parse_time_str = |s: &str| {
         let sa: Vec<&str> = s.split('-').collect();
         if sa.len() != 4 {
@@ -102,36 +109,238 @@ pub async fn delete_log() -> Result<()> {
             let duration = now.signed_duration_since(file_time);
             if duration.num_days() > day {
                 let _ = file.path().remove_if_exists().await;
-                logging!(info, Type::Setup, "delete log file: {}", file_name);
+                logging!(debug, Type::Setup, "delete log file: {}", file_name);
             }
         }
         Ok(())
     };
 
-    let mut log_read_dir = fs::read_dir(&log_dir).await?;
-    while let Some(entry) = log_read_dir.next_entry().await? {
-        std::mem::drop(process_file(entry).await);
+    if log_dir.exists() {
+        let mut log_read_dir = fs::read_dir(&log_dir)
+            .await
+            .with_context(|| format!("failed to read log directory {}", log_dir.display()))?;
+        while let Some(entry) = log_read_dir
+            .next_entry()
+            .await
+            .with_context(|| format!("failed to read next entry in log directory {}", log_dir.display()))?
+        {
+            std::mem::drop(process_file(entry).await);
+        }
     }
 
-    let service_log_dir = log_dir.join("service");
-    let mut service_log_read_dir = fs::read_dir(service_log_dir).await?;
-    while let Some(entry) = service_log_read_dir.next_entry().await? {
-        std::mem::drop(process_file(entry).await);
+    if service_log_dir.exists() {
+        let mut service_log_read_dir = fs::read_dir(&service_log_dir)
+            .await
+            .with_context(|| format!("failed to read service log directory {}", service_log_dir.display()))?;
+        while let Some(entry) = service_log_read_dir.next_entry().await.with_context(|| {
+            format!(
+                "failed to read next entry in service log directory {}",
+                service_log_dir.display()
+            )
+        })? {
+            std::mem::drop(process_file(entry).await);
+        }
     }
 
     Ok(())
 }
 
-/// 初始化DNS配置文件
-async fn init_dns_config() -> Result<()> {
+#[cfg(target_os = "macos")]
+async fn is_logs_dir_writable(log_dir: &Path) -> bool {
+    if !log_dir.is_dir() {
+        logging!(warn, Type::Setup, "macOS logs path is not a directory: {:?}", log_dir);
+        return false;
+    }
+
+    let probe_path = log_dir.join(format!(
+        ".clash-verge-write-test-{}-{}",
+        std::process::id(),
+        Local::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe_path)
+        .await
+    {
+        Ok(_) => {
+            if let Err(e) = fs::remove_file(&probe_path).await {
+                logging!(
+                    warn,
+                    Type::Setup,
+                    "failed to remove macOS logs write probe {:?}: {}",
+                    probe_path,
+                    e
+                );
+            }
+            true
+        }
+        Err(e) => {
+            logging!(
+                warn,
+                Type::Setup,
+                "macOS logs directory is not writable {:?}: {}",
+                log_dir,
+                e
+            );
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn available_legacy_path(parent: &Path, prefix: &str) -> Result<PathBuf> {
+    let timestamp = Local::now().format("%Y%m%d%H%M%S");
+    let base_name = format!("{prefix}-{timestamp}");
+    let candidate = parent.join(&base_name);
+
+    if !candidate.exists() {
+        return Ok(candidate);
+    }
+
+    for index in 1..100 {
+        let candidate = parent.join(format!("{base_name}-{index}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "failed to allocate legacy path under {:?} with prefix {}",
+        parent,
+        prefix
+    ))
+}
+
+#[cfg(target_os = "macos")]
+async fn migrate_legacy_macos_service_logs(log_dir: &Path) -> Result<()> {
+    let legacy_service_dir = log_dir.join("service");
+    if !legacy_service_dir.exists() {
+        return Ok(());
+    }
+
+    let service_logs_root = dirs::service_logs_root_dir()?;
+    fs::create_dir_all(&service_logs_root)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create service logs root {:?}: {}", service_logs_root, e))?;
+
+    let archived_service_dir = available_legacy_path(&service_logs_root, "service.legacy")?;
+    fs::rename(&legacy_service_dir, &archived_service_dir)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to archive legacy macOS service logs {:?} to {:?}: {}",
+                legacy_service_dir,
+                archived_service_dir,
+                e
+            )
+        })?;
+
+    logging!(
+        info,
+        Type::Setup,
+        "Archived legacy macOS service logs: {:?} -> {:?}",
+        legacy_service_dir,
+        archived_service_dir
+    );
+
+    Ok(())
+}
+
+/// Once per install; the marker is written even when no interval needed raising.
+pub async fn migrate_short_update_intervals() -> Result<()> {
+    let marker = dirs::update_interval_migrated_path()?;
+    if fs::try_exists(&marker).await? {
+        return Ok(());
+    }
+
+    // Same lock order as other writers; saving inside the closure keeps a racing restore intact.
+    let _profile_write = crate::config::profiles::PROFILE_WRITE_LOCK.lock().await;
+
+    let min = constants::profile::MIN_UPDATE_INTERVAL;
+    let raised = Config::profiles()
+        .await
+        .with_data_modify(|mut profiles: IProfiles| async move {
+            // A failed profiles load (bare default) must not burn the one-shot marker.
+            if profiles.items.is_none() {
+                anyhow::bail!("profiles.yaml was not loaded; refusing to record the migration as done");
+            }
+            let raised = profiles.raise_short_update_intervals(min);
+            if raised > 0 {
+                profiles.save_file().await?;
+            }
+            Ok((profiles, raised))
+        })
+        .await?;
+
+    if raised > 0 {
+        logging!(
+            info,
+            Type::Setup,
+            "已将 {} 个订阅的自动更新间隔提升到 {} 分钟",
+            raised,
+            min
+        );
+    }
+
+    fs::write(&marker, b"").await?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn migrate_legacy_macos_logs() -> Result<()> {
+    let log_dir = dirs::app_logs_dir()?;
+
+    if !log_dir.exists() {
+        return Ok(());
+    }
+
+    if is_logs_dir_writable(&log_dir).await {
+        if let Err(e) = migrate_legacy_macos_service_logs(&log_dir).await {
+            logging!(warn, Type::Setup, "Failed to migrate legacy macOS service logs: {e:#}");
+        }
+        return Ok(());
+    }
+
+    let app_home = dirs::app_home_dir()?;
+    let archived_log_dir = available_legacy_path(&app_home, "logs.legacy-root")?;
+    fs::rename(&log_dir, &archived_log_dir).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to archive unwritable macOS logs directory {:?} to {:?}: {}",
+            log_dir,
+            archived_log_dir,
+            e
+        )
+    })?;
+
+    logging!(
+        warn,
+        Type::Setup,
+        "Archived unwritable macOS logs directory: {:?} -> {:?}",
+        log_dir,
+        archived_log_dir
+    );
+
+    fs::create_dir_all(&log_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to recreate macOS logs directory {:?}: {}", log_dir, e))?;
+    logging!(info, Type::Setup, "Recreated macOS logs directory: {:?}", log_dir);
+
+    Ok(())
+}
+
+pub(super) async fn init_dns_config() -> Result<()> {
     use serde_yaml_ng::Value;
 
-    // 创建DNS子配置
     let dns_config = serde_yaml_ng::Mapping::from_iter([
         ("enable".into(), Value::Bool(true)),
+        // Must match the frontend default used for authoritative `dns.ipv6`.
+        ("ipv6".into(), Value::Bool(true)),
         ("listen".into(), Value::String(":53".into())),
         ("enhanced-mode".into(), Value::String("fake-ip".into())),
         ("fake-ip-range".into(), Value::String("198.18.0.1/16".into())),
+        ("fake-ip-range6".into(), Value::String("fdfe:dcba:9876::1/64".into())),
         ("fake-ip-filter-mode".into(), Value::String("blacklist".into())),
         ("prefer-h3".into(), Value::Bool(false)),
         ("respect-rules".into(), Value::Bool(false)),
@@ -175,14 +384,7 @@ async fn init_dns_config() -> Result<()> {
             "nameserver-policy".into(),
             Value::Mapping(serde_yaml_ng::Mapping::new()),
         ),
-        (
-            "proxy-server-nameserver".into(),
-            Value::Sequence(vec![
-                Value::String("https://doh.pub/dns-query".into()),
-                Value::String("https://dns.alidns.com/dns-query".into()),
-                Value::String("tls://223.5.5.5".into()),
-            ]),
-        ),
+        ("proxy-server-nameserver".into(), Value::Sequence(vec![])),
         ("direct-nameserver".into(), Value::Sequence(vec![])),
         ("direct-nameserver-follow-policy".into(), Value::Bool(false)),
         (
@@ -209,13 +411,11 @@ async fn init_dns_config() -> Result<()> {
         ),
     ]);
 
-    // 获取默认DNS和host配置
     let default_dns_config = serde_yaml_ng::Mapping::from_iter([
         ("dns".into(), Value::Mapping(dns_config)),
         ("hosts".into(), Value::Mapping(serde_yaml_ng::Mapping::new())),
     ]);
 
-    // 检查DNS配置文件是否存在
     let app_dir = dirs::app_home_dir()?;
     let dns_path = app_dir.join(constants::files::DNS_CONFIG);
 
@@ -227,12 +427,12 @@ async fn init_dns_config() -> Result<()> {
     Ok(())
 }
 
-/// 确保目录结构存在
 async fn ensure_directories() -> Result<()> {
     let directories = [
         ("app_home", dirs::app_home_dir()?),
         ("app_profiles", dirs::app_profiles_dir()?),
         ("app_logs", dirs::app_logs_dir()?),
+        ("service_logs", dirs::service_log_dir()?),
     ];
 
     for (name, dir) in directories {
@@ -247,7 +447,6 @@ async fn ensure_directories() -> Result<()> {
     Ok(())
 }
 
-/// 初始化配置文件
 async fn initialize_config_files() -> Result<()> {
     if let Ok(path) = dirs::clash_path()
         && !path.exists()
@@ -279,7 +478,6 @@ async fn initialize_config_files() -> Result<()> {
         logging!(info, Type::Setup, "Created profiles config at {:?}", path);
     }
 
-    // 验证并修正verge配置
     IVerge::validate_and_fix_config()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to validate verge config: {}", e))?;
@@ -287,13 +485,10 @@ async fn initialize_config_files() -> Result<()> {
     Ok(())
 }
 
-/// Initialize all the config files
-/// before tauri setup
+/// Initializes configuration required before Tauri setup.
 pub async fn init_config() -> Result<()> {
-    // We do not need init_portable_flag here anymore due to lib.rs will to the things
-    // let _ = dirs::init_portable_flag();
-
-    // We do not need init_log here anymore due to resolve will to the things
+    #[cfg(target_os = "macos")]
+    migrate_legacy_macos_logs().await?;
 
     ensure_directories().await?;
 
@@ -301,20 +496,15 @@ pub async fn init_config() -> Result<()> {
 
     AsyncHandler::spawn(|| async {
         if let Err(e) = delete_log().await {
-            logging!(warn, Type::Setup, "Failed to clean old logs: {}", e);
+            logging!(warn, Type::Setup, "Failed to clean old logs: {e:#}");
         }
-        logging!(info, Type::Setup, "后台日志清理任务完成");
+        logging!(debug, Type::Setup, "后台日志清理任务完成");
     });
-
-    if let Err(e) = init_dns_config().await {
-        logging!(warn, Type::Setup, "DNS config initialization failed: {}", e);
-    }
 
     Ok(())
 }
 
-/// initialize app resources
-/// after tauri setup
+/// Initializes application resources after Tauri setup.
 pub async fn init_resources() -> Result<()> {
     let app_dir = dirs::app_home_dir()?;
     let res_dir = dirs::app_resources_dir()?;
@@ -326,10 +516,8 @@ pub async fn init_resources() -> Result<()> {
         std::mem::drop(fs::create_dir_all(&res_dir).await);
     }
 
-    let file_list = ["Country.mmdb", "geoip.dat", "geosite.dat"];
+    let file_list = ["Country.mmdb", "ASN.mmdb", "geoip.dat", "geosite.dat"];
 
-    // copy the resource file
-    // if the source file is newer than the destination file, copy it over
     for file in file_list.iter() {
         let src_path = res_dir.join(file);
         let dest_path = app_dir.join(file);
@@ -358,7 +546,6 @@ pub async fn init_resources() -> Result<()> {
     Ok(())
 }
 
-/// initialize url scheme
 #[cfg(target_os = "windows")]
 pub fn init_scheme() -> Result<()> {
     use tauri::utils::platform::current_exe;
@@ -457,10 +644,9 @@ async fn handle_copy(src: &PathBuf, dest: &PathBuf, file: &str) {
             logging!(
                 error,
                 Type::Setup,
-                "failed to copy resources '{}' to '{:?}', {}",
-                file,
-                dest,
-                err
+                "failed to copy resource {} to {}: {err}",
+                src.display(),
+                dest.display()
             );
         }
     };

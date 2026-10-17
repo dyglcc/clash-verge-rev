@@ -7,6 +7,9 @@ name: Check Formatting
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   HUSKY: 0
 
@@ -14,7 +17,7 @@ jobs:
   rustfmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check Rust changes
         id: check_rust
@@ -38,19 +41,3 @@ jobs:
       - name: run cargo fmt
         if: steps.check_rust.outputs.rust == 'true'
         run: cargo fmt --manifest-path ./src-tauri/Cargo.toml --all -- --check
-
-  # taplo:
-  #   name: taplo (.toml files)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v6
-
-  #     - name: install Rust stable
-  #       uses: dtolnay/rust-toolchain@stable
-
-  #     - name: install taplo-cli
-  #       uses: taiki-e/install-action@v2.68.8
-  #       with:
-  #         tool: taplo-cli
-
-  #     - run: taplo fmt --check --diff

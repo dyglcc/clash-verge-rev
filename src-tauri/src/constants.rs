@@ -11,11 +11,6 @@ pub mod network {
         pub const DEFAULT_MIXED: u16 = 7897;
         pub const DEFAULT_SOCKS: u16 = 7898;
         pub const DEFAULT_HTTP: u16 = 7899;
-
-        #[cfg(not(feature = "verge-dev"))]
-        pub const SINGLETON_SERVER: u16 = 33331;
-        #[cfg(feature = "verge-dev")]
-        pub const SINGLETON_SERVER: u16 = 11233;
     }
 }
 
@@ -25,10 +20,37 @@ pub mod timing {
     pub const CONFIG_UPDATE_DEBOUNCE: Duration = Duration::from_millis(300);
     pub const STARTUP_ERROR_DELAY: Duration = Duration::from_secs(2);
 
+    // How long a re-asked staging request is worth waiting for. One that already landed answers in
+    // milliseconds; anything slower means the Service is still working, so ReplaceCore beats waiting.
+    pub const STAGE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub const RUNTIME_PROVIDER_SYNC_DELAY: Duration = Duration::from_secs(15);
+    pub const RUNTIME_PROVIDER_SYNC_RETRY_DELAY: Duration = Duration::from_secs(15);
+    // mihomo rewrites provider caches in place.
+    pub const RUNTIME_PROVIDER_SETTLE: Duration = Duration::from_secs(2);
+
+    // Windows 服务冷启动较慢,避免过早回退 sidecar。
     #[cfg(target_os = "windows")]
-    pub const SERVICE_WAIT_MAX: Duration = Duration::from_millis(3000);
+    pub const SERVICE_WAIT_MAX: Duration = Duration::from_millis(30000);
     #[cfg(target_os = "windows")]
     pub const SERVICE_WAIT_INTERVAL: Duration = Duration::from_millis(200);
+
+    // 回退 sidecar 后继续等待服务就绪并尝试交接。
+    #[cfg(target_os = "windows")]
+    pub const SERVICE_HANDOFF_WINDOW: Duration = Duration::from_secs(120);
+    #[cfg(target_os = "windows")]
+    pub const SERVICE_HANDOFF_INTERVAL: Duration = Duration::from_secs(2);
+
+    // 交接时等待 sidecar 释放 ext-controller 通道。
+    #[cfg(target_os = "windows")]
+    pub const SERVICE_START_RETRIES: usize = 5;
+    #[cfg(target_os = "windows")]
+    pub const SERVICE_START_RETRY_DELAY: Duration = Duration::from_millis(300);
+}
+
+pub mod profile {
+    /// Floor, in minutes, for how often a profile may auto-update (24 hours).
+    pub const MIN_UPDATE_INTERVAL: u64 = 1440;
 }
 
 pub mod files {
@@ -39,7 +61,21 @@ pub mod files {
 }
 
 pub mod tun {
-    pub const DEFAULT_STACK: &str = "gvisor";
+    pub const DEFAULT_STACK: &str = "mips";
 
     pub const DNS_HIJACK: &[&str] = &["any:53"];
+
+    /// Saved dialog fields; `enable` belongs to the verge switch.
+    pub const GUI_KEYS: &[&str] = &[
+        "stack",
+        "device",
+        "auto-route",
+        "route-exclude-address",
+        #[cfg(target_os = "linux")]
+        "auto-redirect",
+        "auto-detect-interface",
+        "dns-hijack",
+        "strict-route",
+        "mtu",
+    ];
 }

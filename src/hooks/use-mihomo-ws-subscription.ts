@@ -1,9 +1,14 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocalStorage } from 'foxact/use-local-storage'
-import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { type Message, type MihomoWebSocket } from 'tauri-plugin-mihomo-api'
 
-export const RECONNECT_DELAY_MS = 1000
+import {
+  removeCacheData,
+  setCacheData,
+  useQuery,
+} from '@/services/query-client'
+
+const RECONNECT_DELAY_MS = 1000
 
 interface SharedSubscriptionOwner {
   handleMessage: (data: string) => void
@@ -17,7 +22,6 @@ interface SharedSubscriptionEntry {
   ws: MihomoWebSocket | null
   reconnectTimer: ReturnType<typeof setTimeout> | null
   connecting: boolean
-  refHolders: Set<MutableRefObject<MihomoWebSocket | null>>
   owners: Set<SharedSubscriptionOwner>
   activeOwner: SharedSubscriptionOwner | null
   closed: boolean
@@ -26,11 +30,15 @@ interface SharedSubscriptionEntry {
 }
 
 const sharedSubscriptions = new Map<string, SharedSubscriptionEntry>()
+const subscriptionSnapshots = new Map<string, unknown>()
+const initialSubscriptionDate = Date.now()
 
-const syncSharedWsRefs = (entry: SharedSubscriptionEntry) => {
-  entry.refHolders.forEach((ref) => {
-    ref.current = entry.ws
-  })
+const getSubscriptionSnapshot = <T>(key: string) =>
+  subscriptionSnapshots.get(key) as T | undefined
+
+const writeSubscriptionSnapshot = <T>(key: string, data: T) => {
+  subscriptionSnapshots.set(key, data)
+  void setCacheData<T>([key], data)
 }
 
 const pickActiveOwner = (entry: SharedSubscriptionEntry) => {
@@ -52,7 +60,6 @@ const closeSharedSocket = async (entry: SharedSubscriptionEntry) => {
   if (!ws) return
 
   entry.ws = null
-  syncSharedWsRefs(entry)
   await ws.close()
 }
 
@@ -64,7 +71,6 @@ const createSharedSubscriptionEntry = (
     ws: null,
     reconnectTimer: null,
     connecting: false,
-    refHolders: new Set(),
     owners: new Set(),
     activeOwner: null,
     closed: false,
@@ -90,17 +96,11 @@ const createSharedSubscriptionEntry = (
         return
       }
 
-      entry.ws = ws
-      syncSharedWsRefs(entry)
-      clearReconnectTimer()
-
       const owner = pickActiveOwner(entry)
-      if (owner?.onConnected) {
-        await owner.onConnected(ws)
-        if (entry.closed) {
-          await ws.close()
-          return
-        }
+      await owner?.onConnected?.(ws)
+      if (entry.closed) {
+        await ws.close()
+        return
       }
 
       ws.addListener((msg: Message) => {
@@ -110,6 +110,9 @@ const createSharedSubscriptionEntry = (
 
         activeOwner.handleMessage(msg.data)
       })
+
+      entry.ws = ws
+      clearReconnectTimer()
     } catch (ignoreError) {
       if (!entry.closed && !entry.ws) {
         clearReconnectTimer()
@@ -136,7 +139,7 @@ const createSharedSubscriptionEntry = (
 /**
  * Mirrors SWR's MutatorCallback: consumers can pass either a plain value or a
  * functional updater `(current?: T) => T`.  The functional form is resolved
- * against the current cache entry before calling `queryClient.setQueryData`.
+ * against the current subscription snapshot before updating SWR.
  */
 type NextFn<T> = (
   error?: any,
@@ -184,8 +187,7 @@ export const useMihomoWsSubscription = <T>(
     setupHandlers,
   } = options
 
-  // eslint-disable-next-line @eslint-react/purity
-  const [date, setDate] = useLocalStorage(storageKey, Date.now())
+  const [date, setDate] = useLocalStorage(storageKey, initialSubscriptionDate)
   const subscriptKey = buildSubscriptKey(date)
   const subscriptionCacheKey = subscriptKey ? `$sub$${subscriptKey}` : null
   const lastSubscriptionCacheKeyRef = useRef<string | null>(null)
@@ -195,10 +197,6 @@ export const useMihomoWsSubscription = <T>(
   const responseCacheKey =
     subscriptionCacheKey ?? lastSubscriptionCacheKeyRef.current
 
-  const queryClient = useQueryClient()
-
-  const wsRef = useRef<MihomoWebSocket | null>(null)
-
   const resolveNextData = useCallback(
     (
       data: T | ((current?: T) => T | undefined) | undefined,
@@ -206,23 +204,22 @@ export const useMihomoWsSubscription = <T>(
     ): T => {
       if (typeof data === 'function') {
         const updater = data as (current?: T) => T | undefined
-        const current = queryClient.getQueryData<T>([cacheKey])
+        const current = getSubscriptionSnapshot<T>(cacheKey)
         return updater(current) ?? fallbackData
       }
       return data ?? fallbackData
     },
-    [queryClient, fallbackData],
+    [fallbackData],
   )
 
   const response = useQuery<T>({
     queryKey: responseCacheKey ? [responseCacheKey] : ['$sub$__disabled__'],
     queryFn: () =>
-      queryClient.getQueryData<T>([responseCacheKey!]) ?? fallbackData,
+      getSubscriptionSnapshot<T>(responseCacheKey!) ?? fallbackData,
     initialData: () =>
-      queryClient.getQueryData<T>([responseCacheKey ?? '$sub$__disabled__']) ??
+      getSubscriptionSnapshot<T>(responseCacheKey ?? '$sub$__disabled__') ??
       fallbackData,
     staleTime: Infinity,
-    gcTime: 30_000,
     enabled: subscriptionCacheKey !== null,
   })
 
@@ -237,8 +234,6 @@ export const useMihomoWsSubscription = <T>(
     }
 
     entry.refs += 1
-    entry.refHolders.add(wsRef)
-    wsRef.current = entry.ws
 
     let throttleCleanup: (() => void) | undefined
     let wrappedNext: NextFn<T>
@@ -249,7 +244,7 @@ export const useMihomoWsSubscription = <T>(
       }
       if (data === undefined) return
       const resolved = resolveNextData(data, subscriptionCacheKey)
-      queryClient.setQueryData<T>([subscriptionCacheKey], resolved)
+      writeSubscriptionSnapshot(subscriptionCacheKey, resolved)
     }
 
     if (throttleMs && throttleMs > 0) {
@@ -322,8 +317,6 @@ export const useMihomoWsSubscription = <T>(
 
     return () => {
       isMounted = false
-      entry.refHolders.delete(wsRef)
-      wsRef.current = null
       entry.owners.delete(owner)
       owner.cleanup?.()
 
@@ -352,10 +345,20 @@ export const useMihomoWsSubscription = <T>(
 
   const refresh = useCallback(() => {
     if (subscriptionCacheKey) {
-      queryClient.removeQueries({ queryKey: [subscriptionCacheKey] })
+      subscriptionSnapshots.delete(subscriptionCacheKey)
+      void removeCacheData([subscriptionCacheKey])
     }
     setDate(Date.now())
-  }, [queryClient, subscriptionCacheKey, setDate])
+  }, [subscriptionCacheKey, setDate])
 
-  return { response, refresh, subscriptionCacheKey: responseCacheKey, wsRef }
+  const setData = useCallback(
+    (data: T) => {
+      if (responseCacheKey) {
+        writeSubscriptionSnapshot(responseCacheKey, data)
+      }
+    },
+    [responseCacheKey],
+  )
+
+  return { response, refresh, setData }
 }

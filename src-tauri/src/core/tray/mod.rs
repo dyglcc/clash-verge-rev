@@ -1,27 +1,26 @@
 use crate::config::{IProfilePreview, IVerge};
-use crate::core::service;
+use crate::core::lightweight;
+use crate::core::proxy_view::{ProxyGroupView, ProxyMemberRef, ProxyNodeSource, ProxyViewProviderState, ProxyViewV1};
 use crate::core::tray::menu_def::TrayAction;
-use crate::module::lightweight;
 use crate::process::AsyncHandler;
 use crate::singleton;
 use crate::utils::window_manager::WindowManager;
 use crate::{
     Type, cmd,
     config::Config,
+    core::lightweight::is_in_lightweight_mode,
     feat, logging,
-    module::lightweight::is_in_lightweight_mode,
     utils::{dirs::find_target_icons, help},
 };
 use clash_verge_limiter::{Limiter, SystemClock, SystemLimiter};
 use clash_verge_logging::logging_error;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri_plugin_clash_verge_sysinfo::is_current_app_handle_admin;
-use tauri_plugin_mihomo::models::Proxies;
 use tokio::fs;
 
 use super::handle;
 use anyhow::Result;
 use smartstring::alias::String;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::{
@@ -29,6 +28,7 @@ use tauri::{
     menu::{CheckMenuItem, IsMenuItem, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
 };
 
+mod latency;
 mod menu_def;
 #[cfg(target_os = "macos")]
 mod speed_task;
@@ -41,6 +41,12 @@ type ProxyMenuItem = (Option<Submenu<Wry>>, Vec<Box<dyn IsMenuItem<Wry>>>);
 const TRAY_CLICK_DEBOUNCE_MS: u64 = 300;
 pub const TRAY_ID: &str = "clash-verge-rev-tray";
 
+#[derive(Clone, Copy)]
+struct TrayMenuOptions {
+    is_lightweight_mode: bool,
+    include_proxy_groups: bool,
+}
+
 #[derive(Clone)]
 struct TrayState {}
 
@@ -50,15 +56,32 @@ enum IconKind {
     Tun,
 }
 
+struct LatencyMenuItem {
+    item: MenuItem<Wry>,
+    running: bool,
+    proxies: Vec<ProxyLatencyItem>,
+    provider_state: ProxyViewProviderState,
+}
+
+struct ProxyLatencyItem {
+    item: CheckMenuItem<Wry>,
+    name: std::string::String,
+    provider_name: Option<std::string::String>,
+    text: std::string::String,
+}
+
 pub struct Tray {
     limiter: SystemLimiter,
+    proxy_hover_limiter: SystemLimiter,
+    menu_update: tokio::sync::Mutex<()>,
+    latency_items: parking_lot::Mutex<HashMap<std::string::String, LatencyMenuItem>>,
     #[cfg(target_os = "macos")]
     speed_controller: speed_task::TraySpeedController,
 }
 
 impl TrayState {
-    async fn get_tray_icon(verge: &IVerge) -> (bool, Vec<u8>) {
-        let tun_mode = verge.enable_tun_mode.unwrap_or(false);
+    async fn get_tray_icon(verge: &IVerge) -> (bool, Cow<'_, [u8]>) {
+        let tun_mode = verge.enable_tun_mode.unwrap_or(false) && crate::core::runstate::RUN_STATE.state().tun_capable();
         let system_mode = verge.enable_system_proxy.unwrap_or(false);
         let kind = if tun_mode {
             IconKind::Tun
@@ -70,7 +93,7 @@ impl TrayState {
         Self::load_icon(verge, kind).await
     }
 
-    async fn load_icon(verge: &IVerge, kind: IconKind) -> (bool, Vec<u8>) {
+    async fn load_icon(verge: &IVerge, kind: IconKind) -> (bool, Cow<'_, [u8]>) {
         let (custom_enabled, icon_name) = match kind {
             IconKind::Common => (verge.common_tray_icon.unwrap_or(false), "common"),
             IconKind::SysProxy => (verge.sysproxy_tray_icon.unwrap_or(false), "sysproxy"),
@@ -81,13 +104,14 @@ impl TrayState {
             && let Ok(Some(path)) = find_target_icons(icon_name)
             && let Ok(data) = fs::read(path).await
         {
-            return (true, data);
+            return (true, Cow::Owned(data));
         }
 
         Self::default_icon(verge, kind)
     }
 
-    fn default_icon(verge: &IVerge, kind: IconKind) -> (bool, Vec<u8>) {
+    #[allow(clippy::missing_const_for_fn)]
+    fn default_icon(verge: &IVerge, kind: IconKind) -> (bool, Cow<'_, [u8]>) {
         #[cfg(target_os = "macos")]
         {
             let is_mono = verge.tray_icon.as_deref().unwrap_or("monochrome") == "monochrome";
@@ -95,9 +119,11 @@ impl TrayState {
                 return (
                     false,
                     match kind {
-                        IconKind::Common => include_bytes!("../../../icons/tray-icon-mono.ico").to_vec(),
-                        IconKind::SysProxy => include_bytes!("../../../icons/tray-icon-sys-mono-new.ico").to_vec(),
-                        IconKind::Tun => include_bytes!("../../../icons/tray-icon-tun-mono-new.ico").to_vec(),
+                        IconKind::Common => Cow::Borrowed(include_bytes!("../../../icons/tray-icon-mono.ico")),
+                        IconKind::SysProxy => {
+                            Cow::Borrowed(include_bytes!("../../../icons/tray-icon-sys-mono-new.ico"))
+                        }
+                        IconKind::Tun => Cow::Borrowed(include_bytes!("../../../icons/tray-icon-tun-mono-new.ico")),
                     },
                 );
             }
@@ -109,9 +135,9 @@ impl TrayState {
         (
             false,
             match kind {
-                IconKind::Common => include_bytes!("../../../icons/tray-icon.ico").to_vec(),
-                IconKind::SysProxy => include_bytes!("../../../icons/tray-icon-sys.ico").to_vec(),
-                IconKind::Tun => include_bytes!("../../../icons/tray-icon-tun.ico").to_vec(),
+                IconKind::Common => Cow::Borrowed(include_bytes!("../../../icons/tray-icon.ico")),
+                IconKind::SysProxy => Cow::Borrowed(include_bytes!("../../../icons/tray-icon-sys.ico")),
+                IconKind::Tun => Cow::Borrowed(include_bytes!("../../../icons/tray-icon-tun.ico")),
             },
         )
     }
@@ -122,6 +148,9 @@ impl Default for Tray {
     fn default() -> Self {
         Self {
             limiter: Limiter::new(Duration::from_millis(TRAY_CLICK_DEBOUNCE_MS), SystemClock),
+            proxy_hover_limiter: Limiter::new(Duration::from_secs(1), SystemClock),
+            menu_update: tokio::sync::Mutex::new(()),
+            latency_items: parking_lot::Mutex::new(HashMap::new()),
             #[cfg(target_os = "macos")]
             speed_controller: speed_task::TraySpeedController::new(),
         }
@@ -148,7 +177,6 @@ impl Tray {
                 logging!(info, Type::Tray, "System tray created successfully");
             }
             Err(e) => {
-                // Don't return error, let application continue running without tray
                 logging!(
                     warn,
                     Type::Tray,
@@ -159,7 +187,6 @@ impl Tray {
         Ok(())
     }
 
-    /// 更新托盘点击行为
     pub async fn update_click_behavior(&self) -> Result<()> {
         if handle::Handle::global().is_exiting() {
             logging!(debug, Type::Tray, "应用正在退出，跳过托盘点击行为更新");
@@ -179,17 +206,17 @@ impl Tray {
         Ok(())
     }
 
-    /// 更新托盘菜单
     pub async fn update_menu(&self) -> Result<()> {
         if handle::Handle::global().is_exiting() {
             logging!(debug, Type::Tray, "应用正在退出，跳过托盘菜单更新");
             return Ok(());
         }
         let app_handle = handle::Handle::app_handle();
-        self.update_menu_internal(app_handle).await
+        self.update_menu_internal(app_handle, true).await
     }
 
-    async fn update_menu_internal(&self, app_handle: &AppHandle) -> Result<()> {
+    async fn update_menu_internal(&self, app_handle: &AppHandle, include_proxy_groups: bool) -> Result<()> {
+        let _update = self.menu_update.lock().await;
         let Some(tray) = app_handle.tray_by_id(TRAY_ID) else {
             logging!(warn, Type::Tray, "Failed to update tray menu: tray not found");
             return Ok(());
@@ -198,8 +225,7 @@ impl Tray {
         let verge = Config::verge().await.latest_arc();
         let system_proxy = verge.enable_system_proxy.as_ref().unwrap_or(&false);
         let tun_mode = verge.enable_tun_mode.as_ref().unwrap_or(&false);
-        let tun_mode_available =
-            is_current_app_handle_admin(app_handle) || service::is_service_available().await.is_ok();
+        let tun_mode_available = crate::core::runstate::RUN_STATE.state().tun_capable();
         let mode = {
             Config::clash()
                 .await
@@ -215,27 +241,133 @@ impl Tray {
         let profiles_preview = profiles_arc.profiles_preview().unwrap_or_default();
         let is_lightweight_mode = is_in_lightweight_mode();
 
-        logging_error!(
-            Type::Tray,
-            tray.set_menu(Some(
-                create_tray_menu(
-                    app_handle,
-                    Some(mode.as_str()),
-                    *system_proxy,
-                    *tun_mode,
-                    tun_mode_available,
-                    profiles_preview,
-                    is_lightweight_mode,
-                )
-                .await?,
-            ))
-        );
+        let (menu, latency_items) = create_tray_menu(
+            app_handle,
+            Some(mode.as_str()),
+            *system_proxy,
+            *tun_mode,
+            tun_mode_available,
+            profiles_preview,
+            TrayMenuOptions {
+                is_lightweight_mode,
+                include_proxy_groups,
+            },
+        )
+        .await?;
+        tray.set_menu(Some(menu))?;
+        let groups: Vec<_> = latency_items.keys().cloned().collect();
+        *self.latency_items.lock() = latency_items;
+        for group in groups {
+            self.refresh_latency_item(&group);
+        }
 
         logging!(debug, Type::Tray, "托盘菜单更新成功");
         Ok(())
     }
 
-    /// 更新托盘图标
+    async fn refresh_proxy_items(&'static self) {
+        let Ok(update) = self.menu_update.try_lock() else {
+            return;
+        };
+        if self.latency_items.lock().is_empty() || handle::Handle::global().is_exiting() {
+            return;
+        }
+        let Ok(Ok(view)) = tokio::time::timeout(
+            Duration::from_secs(1),
+            cmd::proxy::proxy_view(Some(Duration::from_millis(750))),
+        )
+        .await
+        else {
+            return;
+        };
+        if self
+            .latency_items
+            .lock()
+            .values()
+            .any(|entry| entry.provider_state != view.provider_state)
+        {
+            // Provider fallback changes member identities; rebuild through the existing queue.
+            drop(update);
+            logging_error!(Type::Tray, cmd::proxy::sync_tray_proxy_selection().await);
+            return;
+        }
+        let verge = Config::verge().await.latest_arc();
+        let profiles = Config::profiles().await.latest_arc();
+        logging_error!(
+            Type::Tray,
+            handle::Handle::app_handle().run_on_main_thread(move || {
+                // Keep rebuilding serialized until these handles have received their snapshot.
+                let _update = update;
+                let mut items = self.latency_items.lock();
+                for (group_name, entry) in items.iter_mut() {
+                    let Some(group) = find_group(&view, group_name) else {
+                        continue;
+                    };
+                    let url = latency::test_url(group, &verge, &profiles);
+                    let mut members = HashMap::with_capacity(group.members.len());
+                    for member in &group.members {
+                        members
+                            .entry((member_name(member), member_provider(&view, member)))
+                            .or_insert(member);
+                    }
+                    for proxy in &mut entry.proxies {
+                        let Some(member) = members.get(&(proxy.name.as_str(), proxy.provider_name.as_deref())) else {
+                            continue;
+                        };
+                        let text = proxy_item_text(&view, member, &url, &verge);
+                        let checked = group.now.as_ref() == Some(&proxy.name);
+                        if text != proxy.text {
+                            match proxy.item.set_text(&text) {
+                                Ok(()) => proxy.text = text,
+                                Err(err) => logging!(warn, Type::Tray, "Failed to refresh proxy latency: {err}"),
+                            }
+                        }
+                        match proxy.item.is_checked() {
+                            Ok(current) if current != checked => {
+                                logging_error!(Type::Tray, proxy.item.set_checked(checked))
+                            }
+                            Err(err) => logging!(warn, Type::Tray, "Failed to read proxy selection: {err}"),
+                            _ => {}
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    fn refresh_latency_item(&self, group_name: &str) {
+        let group_name = group_name.to_owned();
+        logging_error!(
+            Type::Tray,
+            handle::Handle::app_handle().run_on_main_thread(move || {
+                Self::global().refresh_latency_item_on_main_thread(&group_name);
+            })
+        );
+    }
+
+    fn refresh_latency_item_on_main_thread(&self, group_name: &str) {
+        let running = latency::is_running(group_name);
+        let item = {
+            let mut items = self.latency_items.lock();
+            items.get_mut(group_name).and_then(|entry| {
+                if entry.running == running {
+                    return None;
+                }
+                entry.running = running;
+                Some(entry.item.clone())
+            })
+        };
+        if let Some(item) = item {
+            let label = if running {
+                clash_verge_i18n::t!("tray.testingLatency")
+            } else {
+                clash_verge_i18n::t!("tray.testLatency")
+            };
+            logging_error!(Type::Tray, item.set_text(label));
+            logging_error!(Type::Tray, item.set_enabled(!running));
+        }
+    }
+
     pub async fn update_icon(&self, verge: &IVerge) -> Result<()> {
         if handle::Handle::global().is_exiting() {
             logging!(debug, Type::Tray, "应用正在退出，跳过托盘图标更新");
@@ -251,21 +383,23 @@ impl Tray {
 
         let (_is_custom_icon, icon_bytes) = TrayState::get_tray_icon(verge).await;
 
-        logging_error!(
-            Type::Tray,
-            tray.set_icon(Some(tauri::image::Image::from_bytes(&icon_bytes)?))
-        );
+        let template = {
+            #[cfg(target_os = "macos")]
+            {
+                verge.tray_icon.as_ref().is_none_or(|v| v == "monochrome")
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        };
+        let icon = Some(tauri::image::Image::from_bytes(&icon_bytes)?);
 
-        #[cfg(target_os = "macos")]
-        {
-            let is_colorful = verge.tray_icon.as_deref().unwrap_or("monochrome") == "colorful";
-            logging_error!(Type::Tray, tray.set_icon_as_template(!is_colorful));
-        }
+        logging_error!(Type::Tray, tray.set_icon_with_as_template(icon, template));
 
         Ok(())
     }
 
-    /// 更新托盘提示
     pub async fn update_tooltip(&self) -> Result<()> {
         if handle::Handle::global().is_exiting() {
             logging!(debug, Type::Tray, "应用正在退出，跳过托盘提示更新");
@@ -276,7 +410,7 @@ impl Tray {
 
         let verge = Config::verge().await.latest_arc();
         let system_proxy = verge.enable_system_proxy.unwrap_or(false);
-        let tun_mode = verge.enable_tun_mode.unwrap_or(false);
+        let tun_mode = verge.enable_tun_mode.unwrap_or(false) && crate::core::runstate::RUN_STATE.state().tun_capable();
 
         let switch_str = |flag: bool| {
             if flag { "on" } else { "off" }
@@ -286,7 +420,7 @@ impl Tray {
         {
             let profiles = Config::profiles().await;
             let profiles = profiles.latest_arc();
-            if let Some(current_profile_uid) = profiles.get_current()
+            if let Some(current_profile_uid) = profiles.current.as_ref()
                 && let Ok(profile) = profiles.get_item(current_profile_uid)
             {
                 current_profile_name = match &profile.name {
@@ -296,7 +430,6 @@ impl Tray {
             }
         }
 
-        // Get localized strings before using them
         let sys_proxy_text = clash_verge_i18n::t!("tray.tooltip.systemProxy");
         let tun_text = clash_verge_i18n::t!("tray.tooltip.tun");
         let profile_text = clash_verge_i18n::t!("tray.tooltip.profile");
@@ -334,7 +467,11 @@ impl Tray {
             return Ok(());
         }
         let verge = Config::verge().await.data_arc();
-        self.update_menu().await?;
+        let app_handle = handle::Handle::app_handle();
+        self.update_menu_internal(app_handle, false).await?;
+        AsyncHandler::spawn(|| async {
+            logging_error!(Type::Tray, Self::global().update_menu().await);
+        });
         self.update_icon(&verge).await?;
         #[cfg(target_os = "macos")]
         self.update_speed_task(verge.enable_tray_speed.unwrap_or(false));
@@ -396,7 +533,6 @@ impl Tray {
         allow
     }
 
-    /// 根据配置统一更新托盘速率采集任务状态（macOS）
     #[cfg(target_os = "macos")]
     pub fn update_speed_task(&self, enable_tray_speed: bool) {
         self.speed_controller.update_task(enable_tray_speed);
@@ -447,99 +583,175 @@ fn create_profile_menu_item(
         .collect()
 }
 
+const UNTESTED_DELAY_TEXT: &str = "-ms";
+const TIMEOUT_DELAY_TEXT: &str = "T/O";
+const TRAY_GROUP_DEPTH_LIMIT: usize = 8;
+
+const fn member_name(member: &ProxyMemberRef) -> &str {
+    match member {
+        ProxyMemberRef::Node { name, .. }
+        | ProxyMemberRef::Group { name }
+        | ProxyMemberRef::Unresolved { name, .. } => name.as_str(),
+    }
+}
+
+fn find_group<'a>(view: &'a ProxyViewV1, name: &str) -> Option<&'a ProxyGroupView> {
+    view.groups
+        .iter()
+        .chain(view.global.iter())
+        .find(|group| group.name.as_str() == name)
+}
+
+/// The delay recorded for `url`, falling back to the node's latest measurement under any URL, so a
+/// node the core tested on its own still shows a value.
+fn node_delay(view: &ProxyViewV1, record_id: &str, url: &str) -> Option<u16> {
+    view.records
+        .get(record_id)
+        .map(|node| node.extra.get(url).map_or(&node.history, |extra| &extra.history))
+        .and_then(|history| history.last())
+        .map(|history| history.delay)
+}
+
+/// A group row shows the delay of the node the group currently selects. The core never writes a
+/// history for the group itself, so `now` is followed until the chain reaches a node.
+fn selected_member_delay(view: &ProxyViewV1, group_name: &str, url: &str) -> Option<u16> {
+    let mut current = group_name;
+    for _ in 0..TRAY_GROUP_DEPTH_LIMIT {
+        let Some(group) = find_group(view, current) else { break };
+        let Some(now) = group.now.as_deref().filter(|now| !now.is_empty() && *now != current) else {
+            break;
+        };
+        let Some(member) = group.members.iter().find(|member| member_name(member) == now) else {
+            break;
+        };
+        match member {
+            ProxyMemberRef::Node { record_id, .. } => return node_delay(view, record_id, url),
+            ProxyMemberRef::Group { name } => current = name.as_str(),
+            ProxyMemberRef::Unresolved { .. } => break,
+        }
+    }
+    find_group(view, group_name)
+        .map(|group| group.extra.get(url).map_or(&group.history, |extra| &extra.history))
+        .and_then(|history| history.last())
+        .map(|history| history.delay)
+}
+
+fn member_provider<'a>(view: &'a ProxyViewV1, member: &ProxyMemberRef) -> Option<&'a str> {
+    let ProxyMemberRef::Node { record_id, .. } = member else {
+        return None;
+    };
+    match &view.records.get(record_id)?.source {
+        ProxyNodeSource::Provider { provider_name, .. } => Some(provider_name),
+        ProxyNodeSource::Core { .. } => None,
+    }
+}
+
+fn proxy_item_text(view: &ProxyViewV1, member: &ProxyMemberRef, url: &str, verge: &IVerge) -> std::string::String {
+    let timeout = verge
+        .default_latency_timeout
+        .filter(|timeout| *timeout > 0)
+        .unwrap_or(10000);
+    let delay = match member {
+        ProxyMemberRef::Node { record_id, .. } => node_delay(view, record_id, url),
+        ProxyMemberRef::Group { name } => selected_member_delay(view, name, url),
+        ProxyMemberRef::Unresolved { .. } => None,
+    };
+    let delay_text = delay.map_or_else(
+        || UNTESTED_DELAY_TEXT.to_owned(),
+        |delay| {
+            if delay == 0 || u32::from(delay) >= timeout as u32 {
+                TIMEOUT_DELAY_TEXT.to_owned()
+            } else {
+                format!("{delay}ms")
+            }
+        },
+    );
+    format!("{}   | {delay_text}", member_name(member))
+}
+
 fn create_subcreate_proxy_menu_item(
     app_handle: &AppHandle,
     proxy_mode: &str,
-    proxy_group_order_map: Option<HashMap<String, usize>>,
-    proxy_nodes_data: Option<Proxies>,
+    view: Option<ProxyViewV1>,
+    latency_items: &mut HashMap<std::string::String, LatencyMenuItem>,
+    texts: &MenuTexts,
+    verge: &IVerge,
+    profiles: &crate::config::IProfiles,
 ) -> Vec<Submenu<Wry>> {
-    let proxy_submenus: Vec<Submenu<Wry>> = {
-        let mut submenus: Vec<(String, usize, Submenu<Wry>)> = Vec::new();
-
-        // TODO: 应用启动时，内核还未启动完全，无法获取代理节点信息
-        if let Some(proxy_nodes_data) = proxy_nodes_data {
-            for (group_name, group_data) in proxy_nodes_data.proxies.iter() {
-                // Filter groups based on mode and hidden flag
-                let should_show = match proxy_mode {
-                    "global" => group_name == "GLOBAL",
-                    _ => group_name != "GLOBAL",
-                } && !group_data.hidden.unwrap_or_default();
-
-                if !should_show {
-                    continue;
-                }
-
-                let Some(all_proxies) = group_data.all.as_ref() else {
-                    continue;
-                };
-
-                let now_proxy = group_data.now.as_deref().unwrap_or_default();
-
-                // Create proxy items
-                let group_items: Vec<CheckMenuItem<Wry>> = all_proxies
-                    .iter()
-                    .filter_map(|proxy_str| {
-                        let is_selected = *proxy_str == now_proxy;
-                        let item_id = format!("proxy_{}_{}", group_name, proxy_str);
-
-                        // Get delay for display
-                        let delay_text = proxy_nodes_data
-                            .proxies
-                            .get(proxy_str)
-                            .and_then(|h| h.history.last())
-                            .map(|h| match h.delay {
-                                0 => "-ms".into(),
-                                delay if delay >= 10000 => "-ms".into(),
-                                _ => format!("{}ms", h.delay),
-                            })
-                            .unwrap_or_else(|| "-ms".into());
-
-                        let display_text = format!("{}   | {}", proxy_str, delay_text);
-
-                        CheckMenuItem::with_id(app_handle, item_id, display_text, true, is_selected, None::<&str>)
-                            .map_err(|e| logging!(warn, Type::Tray, "Failed to create proxy menu item: {}", e))
-                            .ok()
-                    })
-                    .collect();
-
-                if group_items.is_empty() {
-                    continue;
-                }
-
-                let group_display_name = group_name.to_string();
-
-                let group_items_refs: Vec<&dyn IsMenuItem<Wry>> =
-                    group_items.iter().map(|item| item as &dyn IsMenuItem<Wry>).collect();
-
-                if let Ok(submenu) = Submenu::with_id_and_items(
-                    app_handle,
-                    format!("proxy_group_{}", group_name),
-                    group_display_name,
-                    true,
-                    &group_items_refs,
-                ) {
-                    let insertion_index = submenus.len();
-                    submenus.push((group_name.into(), insertion_index, submenu));
-                } else {
-                    logging!(warn, Type::Tray, "Failed to create proxy group submenu: {}", group_name);
-                }
+    let Some(view) = view else { return Vec::new() };
+    view.groups
+        .iter()
+        .chain(view.global.iter())
+        .filter_map(|group| {
+            if group.hidden.unwrap_or_default() || (proxy_mode == "global") != (group.name == "GLOBAL") {
+                return None;
             }
-        }
-
-        if let Some(order_map) = proxy_group_order_map.as_ref() {
-            submenus.sort_by(|(name_a, original_index_a, _), (name_b, original_index_b, _)| {
-                match (order_map.get(name_a), order_map.get(name_b)) {
-                    (Some(index_a), Some(index_b)) => index_a.cmp(index_b),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => original_index_a.cmp(original_index_b),
-                }
-            });
-        }
-
-        submenus.into_iter().map(|(_, _, submenu)| submenu).collect()
-    };
-    proxy_submenus
+            let url = latency::test_url(group, verge, profiles);
+            let proxies: Vec<ProxyLatencyItem> = group
+                .members
+                .iter()
+                .filter_map(|member| {
+                    let name = member_name(member);
+                    let text = proxy_item_text(&view, member, &url, verge);
+                    let checked = group.now.as_deref() == Some(name);
+                    CheckMenuItem::with_id(
+                        app_handle,
+                        format!("proxy_{}_{}", group.name, name),
+                        &text,
+                        true,
+                        checked,
+                        None::<&str>,
+                    )
+                    .map(|item| ProxyLatencyItem {
+                        item,
+                        name: name.to_owned(),
+                        provider_name: member_provider(&view, member).map(str::to_owned),
+                        text,
+                    })
+                    .map_err(|e| logging!(warn, Type::Tray, "Failed to create proxy menu item: {e}"))
+                    .ok()
+                })
+                .collect();
+            let group_items: Vec<_> = proxies.iter().map(|proxy| proxy.item.clone()).collect();
+            if group_items.is_empty() {
+                return None;
+            }
+            let running = latency::is_running(&group.name);
+            let test_item = MenuItem::with_id(
+                app_handle,
+                format!("{}_{}", MenuIds::TEST_LATENCY, group.name),
+                if running {
+                    clash_verge_i18n::t!("tray.testingLatency")
+                } else {
+                    texts.test_latency.clone()
+                },
+                !running,
+                None::<&str>,
+            )
+            .ok()?;
+            latency_items.insert(
+                group.name.clone(),
+                LatencyMenuItem {
+                    item: test_item.clone(),
+                    running,
+                    proxies,
+                    provider_state: view.provider_state,
+                },
+            );
+            let separator = PredefinedMenuItem::separator(app_handle).ok()?;
+            let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&test_item, &separator];
+            items.extend(group_items.iter().map(|item| item as &dyn IsMenuItem<Wry>));
+            Submenu::with_id_and_items(
+                app_handle,
+                format!("proxy_group_{}", group.name),
+                &group.name,
+                true,
+                &items,
+            )
+            .map_err(|e| logging!(warn, Type::Tray, "Failed to create proxy group submenu: {e}"))
+            .ok()
+        })
+        .collect()
 }
 
 fn create_proxy_menu_item(
@@ -548,7 +760,6 @@ fn create_proxy_menu_item(
     proxy_submenus: Vec<Submenu<Wry>>,
     proxies_text: &str,
 ) -> Result<ProxyMenuItem> {
-    // 创建代理主菜单
     let (proxies_submenu, inline_proxy_items) = if show_proxy_groups_inline {
         (
             None,
@@ -586,58 +797,39 @@ async fn create_tray_menu(
     tun_mode_enabled: bool,
     tun_mode_available: bool,
     profiles_preview: Vec<IProfilePreview<'_>>,
-    is_lightweight_mode: bool,
-) -> Result<tauri::menu::Menu<Wry>> {
+    options: TrayMenuOptions,
+) -> Result<(tauri::menu::Menu<Wry>, HashMap<std::string::String, LatencyMenuItem>)> {
     let current_proxy_mode = mode.unwrap_or("");
 
-    // TODO: should update tray menu again when it was timeout error
-    let proxy_nodes_data = tokio::time::timeout(
-        Duration::from_millis(1000),
-        handle::Handle::mihomo().await.get_proxies(),
-    )
-    .await
-    .map_or(None, |res| res.ok());
+    let mut verge_settings = Config::verge().await.latest_arc();
+    let fetch_proxy_groups =
+        options.include_proxy_groups && verge_settings.tray_proxy_groups_display_mode.as_deref() != Some("disable");
 
-    let runtime_proxy_groups_order = cmd::get_runtime_config()
+    // Proxy data must remain optional so a stopped Core cannot roll back unrelated settings.
+    let proxy_view = if fetch_proxy_groups {
+        tokio::time::timeout(
+            Duration::from_millis(1000),
+            cmd::proxy::proxy_view(Some(Duration::from_millis(750))),
+        )
         .await
-        .map_err(|e| {
-            logging!(
-                error,
-                Type::Cmd,
-                "Failed to fetch runtime proxy groups for tray menu: {e}"
-            );
-        })
         .ok()
-        .flatten()
-        .map(|config| {
-            config
-                .get("proxy-groups")
-                .and_then(|groups| groups.as_sequence())
-                .map(|groups| {
-                    groups
-                        .iter()
-                        .filter_map(|group| group.get("name"))
-                        .filter_map(|name| name.as_str())
-                        .map(|name| name.into())
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default()
-        });
+        .and_then(Result::ok)
+    } else {
+        None
+    };
 
-    let proxy_group_order_map: Option<HashMap<smartstring::SmartString<smartstring::LazyCompact>, usize>> =
-        runtime_proxy_groups_order.as_ref().map(|group_names| {
-            group_names
-                .iter()
-                .enumerate()
-                .map(|(index, name)| (name.clone(), index))
-                .collect::<HashMap<String, usize>>()
-        });
+    if fetch_proxy_groups {
+        verge_settings = Config::verge().await.latest_arc();
+    }
 
-    let verge_settings = Config::verge().await.latest_arc();
+    let profiles_config = Config::profiles().await.latest_arc();
+
     let tray_proxy_groups_display_mode = verge_settings
         .tray_proxy_groups_display_mode
         .as_deref()
         .unwrap_or("default");
+    let include_proxy_groups = options.include_proxy_groups && tray_proxy_groups_display_mode != "disable";
+
     let show_outbound_modes_inline = verge_settings.tray_inline_outbound_modes.unwrap_or(false);
 
     let version = env!("CARGO_PKG_VERSION");
@@ -646,9 +838,7 @@ async fn create_tray_menu(
 
     let profile_menu_items: Vec<CheckMenuItem<Wry>> = create_profile_menu_item(app_handle, profiles_preview)?;
 
-    // Pre-fetch all localized strings
     let texts = MenuTexts::new();
-    // Convert to references only when needed
     let profile_menu_items_refs: Vec<&dyn IsMenuItem<Wry>> = profile_menu_items
         .iter()
         .map(|item| item as &dyn IsMenuItem<Wry>)
@@ -719,13 +909,25 @@ async fn create_tray_menu(
         &profile_menu_items_refs,
     )?;
 
-    let proxy_sub_menus =
-        create_subcreate_proxy_menu_item(app_handle, current_proxy_mode, proxy_group_order_map, proxy_nodes_data);
+    let mut latency_items = HashMap::new();
+    let (proxies_menu, inline_proxy_items) = if include_proxy_groups {
+        let proxy_sub_menus = create_subcreate_proxy_menu_item(
+            app_handle,
+            current_proxy_mode,
+            proxy_view,
+            &mut latency_items,
+            &texts,
+            &verge_settings,
+            &profiles_config,
+        );
 
-    let (proxies_menu, inline_proxy_items) = match tray_proxy_groups_display_mode {
-        "default" => create_proxy_menu_item(app_handle, false, proxy_sub_menus, &texts.proxies)?,
-        "inline" => create_proxy_menu_item(app_handle, true, proxy_sub_menus, &texts.proxies)?,
-        _ => (None, Vec::new()),
+        match tray_proxy_groups_display_mode {
+            "default" => create_proxy_menu_item(app_handle, false, proxy_sub_menus, &texts.proxies)?,
+            "inline" => create_proxy_menu_item(app_handle, true, proxy_sub_menus, &texts.proxies)?,
+            _ => (None, Vec::new()),
+        }
+    } else {
+        (None, Vec::new())
     };
 
     let system_proxy = &CheckMenuItem::with_id(
@@ -759,7 +961,7 @@ async fn create_tray_menu(
         MenuIds::LIGHTWEIGHT_MODE,
         &texts.lightweight_mode,
         true,
-        is_lightweight_mode,
+        options.is_lightweight_mode,
         hotkeys.get("entry_lightweight_mode").copied(),
     )?;
 
@@ -824,7 +1026,6 @@ async fn create_tray_menu(
 
     let separator = &PredefinedMenuItem::separator(app_handle)?;
 
-    // 动态构建菜单项
     let mut menu_items: Vec<&dyn IsMenuItem<Wry>> = vec![open_window, separator];
 
     if show_outbound_modes_inline {
@@ -839,7 +1040,6 @@ async fn create_tray_menu(
 
     menu_items.extend_from_slice(&[separator, profiles]);
 
-    // 如果有代理节点，添加代理节点菜单
     match tray_proxy_groups_display_mode {
         "default" => {
             menu_items.extend(proxies_menu.iter().map(|item| item as &dyn IsMenuItem<_>));
@@ -863,10 +1063,25 @@ async fn create_tray_menu(
     ]);
 
     let menu = tauri::menu::MenuBuilder::new(app_handle).items(&menu_items).build()?;
-    Ok(menu)
+    Ok((menu, latency_items))
 }
 
 fn on_tray_icon_event(_tray_icon: &TrayIcon, tray_event: TrayIconEvent) {
+    let refresh_proxies = match tray_event {
+        TrayIconEvent::Enter { .. } => Tray::global().proxy_hover_limiter.check(),
+        TrayIconEvent::Click {
+            button: MouseButton::Left | MouseButton::Right,
+            button_state: MouseButtonState::Down,
+            ..
+        } => true,
+        _ => false,
+    };
+    if refresh_proxies {
+        AsyncHandler::spawn(|| async {
+            Tray::global().refresh_proxy_items().await;
+        });
+    }
+
     if matches!(
         tray_event,
         TrayIconEvent::Move { .. } | TrayIconEvent::Leave { .. } | TrayIconEvent::Enter { .. }
@@ -880,7 +1095,6 @@ fn on_tray_icon_event(_tray_icon: &TrayIcon, tray_event: TrayIconEvent) {
         ..
     } = tray_event
     {
-        // 添加防抖检查，防止快速连击
         #[allow(clippy::use_self)]
         if !Tray::global().should_handle_tray_click() {
             return;
@@ -903,7 +1117,10 @@ fn on_tray_icon_event(_tray_icon: &TrayIcon, tray_event: TrayIconEvent) {
                         WindowManager::show_main_window().await;
                     };
                 }
-                _ => {
+                // tray_menu 模式下菜单由系统原生展示（见 set_show_menu_on_left_click），
+                // 左键点击事件无需额外处理
+                TrayAction::TrayMenu => {}
+                TrayAction::Unknown => {
                     logging!(warn, Type::Tray, "invalid tray event: {}", verge_tray_event);
                 }
             };
@@ -921,12 +1138,9 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
     AsyncHandler::spawn(|| async move {
         match event.id.as_ref() {
             mode @ (MenuIds::RULE_MODE | MenuIds::GLOBAL_MODE | MenuIds::DIRECT_MODE) => {
-                // Removing the the "tray_" prefix and "_mode" suffix
-                if let Some(stripped) = mode.strip_prefix("tray_")
-                    && let Some(final_mode) = stripped.strip_suffix("_mode")
-                {
+                if let Some(final_mode) = mode.strip_circumfix("tray_", "_mode") {
                     logging!(info, Type::ProxyMode, "Switch Proxy Mode To: {}", final_mode);
-                    feat::change_clash_mode(final_mode.into()).await;
+                    let _ = feat::change_clash_mode(final_mode.into()).await;
                 }
             }
             MenuIds::DASHBOARD => {
@@ -936,13 +1150,13 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                 };
             }
             MenuIds::SYSTEM_PROXY => {
-                feat::toggle_system_proxy().await;
+                let _ = feat::toggle_system_proxy().await;
             }
             MenuIds::TUN_MODE => {
                 feat::toggle_tun_mode(None).await;
             }
             MenuIds::CLOSE_ALL_CONNECTIONS => {
-                if let Err(err) = handle::Handle::mihomo().await.close_all_connections().await {
+                if let Err(err) = handle::Handle::mihomo().close_all_connections().await {
                     logging!(error, Type::Tray, "Failed to close all connections from tray: {err}");
                 }
             }
@@ -960,7 +1174,7 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                 let _ = help::open_app_latest_log();
             }
             MenuIds::CORE_LOG => {
-                let _ = help::open_core_latest_log();
+                let _ = help::open_core_latest_log().await;
             }
             MenuIds::RESTART_CLASH => feat::restart_clash_core().await,
             MenuIds::RESTART_APP => feat::restart_app().await,
@@ -981,8 +1195,16 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                 };
                 feat::toggle_proxy_profile(profile_index.into()).await;
             }
+            id if id.starts_with(MenuIds::TEST_LATENCY) => {
+                let group_name = id
+                    .strip_prefix(MenuIds::TEST_LATENCY)
+                    .and_then(|rest| rest.strip_prefix('_'));
+                if let Some(group_name) = group_name {
+                    logging!(info, Type::Tray, "Tray menu: test group latency {}", group_name);
+                    latency::test_proxy_group_delay(group_name).await;
+                }
+            }
             id if id.starts_with("proxy_") => {
-                // proxy_{group_name}_{proxy_name}
                 let rest = match id.strip_prefix("proxy_") {
                     Some(r) => r,
                     None => return,
@@ -997,8 +1219,5 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                 logging!(debug, Type::Tray, "Unhandled tray menu event: {:?}", event.id);
             }
         }
-
-        // We dont expected to refresh tray state here
-        // as the inner handle function (SHOULD) already takes care of it
     });
 }

@@ -3,6 +3,7 @@ import { fetch } from '@tauri-apps/plugin-http'
 import { asyncRetry } from 'foxts/async-retry'
 import { extractErrorMessage } from 'foxts/extract-error-message'
 import { once } from 'foxts/once'
+import i18n from 'i18next'
 
 import { debugLog } from '@/utils/debug'
 
@@ -145,7 +146,9 @@ export const getIpInfo = async (): Promise<
   const maxRetries = 2
   const serviceTimeout = 5000
 
-  const shuffledServices = IP_CHECK_SERVICES.toSorted(() => Math.random() - 0.5)
+  const shuffledServices = IP_CHECK_SERVICES.slice().sort(
+    () => Math.random() - 0.5,
+  )
   let lastError: unknown | null = null
   const userAgent = await getUserAgentPromise()
   console.debug('User-Agent for IP detection:', userAgent)
@@ -213,10 +216,15 @@ export const getIpInfo = async (): Promise<
   }
 
   if (lastError) {
+    console.error('[IP Info] All detection services failed:', lastError)
     throw new Error(
-      `所有IP检测服务都失败: ${extractErrorMessage(lastError) || '未知错误'}`,
+      i18n.t(($) => $.home.components.ipInfo.errors.loadWithDetails, {
+        message:
+          extractErrorMessage(lastError) ||
+          i18n.t(($) => $.shared.feedback.errors.unknown),
+      }),
     )
   } else {
-    throw new Error('没有可用的IP检测服务')
+    throw new Error(i18n.t(($) => $.home.components.ipInfo.errors.noServices))
   }
 }

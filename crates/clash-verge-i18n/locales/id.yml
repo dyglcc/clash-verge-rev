@@ -10,6 +10,12 @@ notifications:
     title: Proksi Sistem
     'on': System proxy has been enabled.
     'off': System proxy has been disabled.
+  systemProxyFailed:
+    title: Proxy Sistem
+    body: Proxy sistem tidak dapat diatur. Buka Clash Verge untuk melihat alasannya.
+  systemProxyGuardStopped:
+    title: Penjaga Proxy Sistem
+    body: Berhenti setelah gagal beberapa kali berturut-turut. Buka Clash Verge untuk melihat alasannya.
   tunModeToggled:
     title: Mode TUN
     'on': TUN mode has been enabled.
@@ -23,9 +29,6 @@ notifications:
   appQuit:
     title: Akan Keluar
     body: Clash Verge akan keluar.
-  appHidden:
-    title: Aplikasi Disembunyikan
-    body: Clash Verge berjalan di latar belakang.
   updateReady:
     title: Clash Verge Update
     body: A new version (v{version}) has been downloaded and is ready to install.
@@ -34,6 +37,28 @@ notifications:
 service:
   adminInstallPrompt: Menginstal layanan Clash Verge memerlukan hak administrator.
   adminUninstallPrompt: Menghapus instalasi layanan Clash Verge memerlukan hak administrator.
+core:
+  alreadyRunning: 'Tidak dapat memulai inti: proses inti sudah berjalan. Tutup aplikasi terkait atau hentikan proses yang tersisa, lalu coba lagi. Jika masalah berlanjut, mulai ulang komputer.'
+launchGuard:
+  currentExeError: 'Lokasi aplikasi tidak dapat ditentukan: {error}'
+  homeDirError: 'Direktori beranda pengguna saat ini tidak dapat ditentukan. Aplikasi akan ditutup: {error}'
+  translocated: macOS menjalankan aplikasi ini dari jalur App Translocation sementara. Pindahkan secara manual di Finder ke /Applications atau ~/Applications, lalu buka kembali.
+  rejected: |-
+    Aplikasi ini harus dijalankan dari direktori Applications.
+
+    {reason}
+  notInBundle: Berkas yang dapat dijalankan tidak berada di dalam bundel aplikasi.
+  canonicalizeBundleError: 'Jalur bundel aplikasi tidak dapat diuraikan: {error}'
+  bundleNameError: Nama bundel aplikasi tidak dapat ditentukan. Aplikasi akan ditutup.
+  replacePrompt: Sudah ada aplikasi di {destination}. Ganti dan jalankan ulang dari Applications?
+  movePrompt: Agar layanan latar belakang dapat dimulai dengan aman, aplikasi harus dipindahkan ke {destination}. Pindahkan dan jalankan ulang sekarang?
+  createApplicationsDirError: 'Direktori Applications tidak dapat dibuat: {error}'
+  moveFailed: Aplikasi gagal dipindahkan. Pindahkan secara manual di Finder lalu coba lagi.
+  replaceFailed: 'Aplikasi yang ada tidak dapat diganti dengan aman: {error}'
+  relaunchFailed: Aplikasi telah disalin, tetapi tidak dapat dijalankan ulang secara otomatis. Buka secara manual dari Applications.
+  cancel: Batal
+  move: Pindahkan
+  ok: OK
 tray:
   dashboard: Dasbor
   ruleMode: Mode Aturan
@@ -45,6 +70,8 @@ tray:
   global: Global
   profiles: Profil
   proxies: Proksi
+  testLatency: Uji Latensi
+  testingLatency: Menguji latensi…
   systemProxy: Proksi Sistem
   tunMode: Mode TUN
   closeAllConnections: Tutup Semua Koneksi

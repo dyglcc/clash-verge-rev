@@ -1,7 +1,7 @@
 use super::CmdResult;
 use crate::{
     cmd::StringifyErr as _,
-    config::{Config, DedicatedLineConfig, IVerge},
+    config::{Config, DedicatedLineConfig, IVerge, MixedPort},
     feat,
 };
 use smartstring::alias::String;
@@ -35,7 +35,7 @@ pub async fn patch_dedicated_line(config: DedicatedLineConfig) -> CmdResult<()> 
 /// 这样验证的是「链路本身」是否生效，不依赖是否开启 TUN / 系统代理。
 #[tauri::command]
 pub async fn verify_dedicated_line_ip() -> CmdResult<String> {
-    let port = Config::verge().await.latest_arc().verge_mixed_port.unwrap_or(7897);
+    let port = MixedPort::effective().await;
     let proxy_url = format!("http://127.0.0.1:{port}");
 
     let proxy = reqwest::Proxy::all(&proxy_url).stringify_err()?;
@@ -51,8 +51,11 @@ pub async fn verify_dedicated_line_ip() -> CmdResult<String> {
         .header("User-Agent", "curl/8.0.0")
         .send()
         .await
+        .stringify_err()?
+        .error_for_status()
         .stringify_err()?;
 
     let ip = resp.text().await.stringify_err()?;
-    Ok(ip.trim().into())
+    let ip = ip.trim().parse::<std::net::IpAddr>().stringify_err()?;
+    Ok(ip.to_string().into())
 }

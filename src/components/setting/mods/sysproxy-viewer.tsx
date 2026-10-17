@@ -18,7 +18,6 @@ import {
   useEffect,
   useImperativeHandle,
   useMemo,
-  useRef,
   useState,
 } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -27,29 +26,23 @@ import {
   BaseDialog,
   BaseFieldset,
   BaseSplitChipEditor,
-  DialogRef,
+  type DialogRef,
   Switch,
   TooltipIcon,
 } from '@/components/base'
 import { EditorViewer } from '@/components/profile/editor-viewer'
+import { useDisplayedMixedPort } from '@/hooks/use-displayed-mixed-port'
 import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
 import { useVerge } from '@/hooks/use-verge'
-import { useClashConfigData, useSystemData } from '@/providers/app-data-context'
+import { useSystemData } from '@/providers/app-data-context'
 import {
-  getAutotemProxy,
+  getEmbeddedServerPort,
   getNetworkInterfacesInfo,
   getSystemHostname,
-  getSystemProxy,
-  patchVergeConfig,
 } from '@/services/cmds'
 import { showNotice } from '@/services/notice-service'
 import { debugLog } from '@/utils/debug'
 import getSystem from '@/utils/get-system'
-
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, ms)
-  })
 
 const DEFAULT_PAC = `function FindProxyForURL(url, host) {
   return "PROXY %proxy_host%:%mixed-port%; SOCKS5 %proxy_host%:%mixed-port%; DIRECT;";
@@ -108,7 +101,6 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
   const { verge, patchVerge, mutateVerge } = useVerge()
   const [hostOptions, setHostOptions] = useState<string[]>([])
 
-  const { clashConfig } = useClashConfigData()
   const { indicator: isProxyReallyEnabled, invalidateProxyState } =
     useSystemProxyState()
 
@@ -134,6 +126,13 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
     pac_content: pac_file_content ?? DEFAULT_PAC,
     proxy_host: proxy_host ?? '127.0.0.1',
   })
+  const [embeddedServerPort, setEmbeddedServerPort] = useState<number | null>(
+    null,
+  )
+
+  useEffect(() => {
+    getEmbeddedServerPort().then(setEmbeddedServerPort).catch(console.error)
+  }, [])
 
   const separator = useMemo(() => (isWindows ? ';' : ','), [isWindows])
 
@@ -147,66 +146,25 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
     return '127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,localhost,*.local,*.crashlytics.com,<local>'
   }
 
-  const prevMixedPortRef = useRef(clashConfig?.mixedPort)
-
-  useEffect(() => {
-    const mixedPort = clashConfig?.mixedPort
-    if (!mixedPort || mixedPort === prevMixedPortRef.current) {
-      return
-    }
-
-    prevMixedPortRef.current = mixedPort
-    if (!enabled) {
-      return
-    }
-
-    const updateProxy = async () => {
-      try {
-        const currentSysProxy = await getSystemProxy()
-        const currentAutoProxy = await getAutotemProxy()
-
-        if (value.pac ? currentAutoProxy?.enable : currentSysProxy?.enable) {
-          await patchVergeConfig({ enable_system_proxy: false })
-          await sleep(200)
-          await patchVergeConfig({ enable_system_proxy: true })
-          await invalidateProxyState()
-        }
-      } catch (err) {
-        showNotice.error(err)
-      }
-    }
-
-    updateProxy()
-  }, [clashConfig?.mixedPort, enabled, value.pac, invalidateProxyState])
-
   const { systemProxyAddress } = useSystemData()
+  const displayedMixedPort = useDisplayedMixedPort()
 
-  // 为当前状态计算系统代理地址
   const getSystemProxyAddress = useMemo(() => {
-    if (!clashConfig) return '-'
-
     const isPacMode = value.pac ?? false
 
     if (isPacMode) {
       const host = value.proxy_host || '127.0.0.1'
-      const port = verge?.verge_mixed_port || clashConfig.mixedPort || 7897
-      return `${host}:${port}`
+      return `${host}:${displayedMixedPort}`
     } else {
       return systemProxyAddress
     }
-  }, [
-    value.pac,
-    value.proxy_host,
-    verge?.verge_mixed_port,
-    clashConfig,
-    systemProxyAddress,
-  ])
+  }, [value.pac, value.proxy_host, displayedMixedPort, systemProxyAddress])
   const getCurrentPacUrl = useMemo(() => {
     const host = value.proxy_host || '127.0.0.1'
-    // 根据环境判断PAC端口
-    const port = import.meta.env.DEV ? 11233 : 33331
-    return `http://${host}:${port}/commands/pac`
-  }, [value.proxy_host])
+    return embeddedServerPort
+      ? `http://${host}:${embeddedServerPort}/commands/pac`
+      : '-'
+  }, [embeddedServerPort, value.proxy_host])
 
   const bypassError =
     value.enable_bypass_check &&
@@ -249,26 +207,22 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
     close: () => setOpen(false),
   }))
 
-  // 获取网络接口和主机名
   const fetchNetworkInterfaces = async () => {
     try {
-      // 获取系统网络接口信息
       const interfaces = await getNetworkInterfacesInfo()
       const ipAddresses: string[] = []
 
-      // 从interfaces中提取IPv4和IPv6地址
       interfaces.forEach((iface) => {
         iface.addr.forEach((address) => {
-          if (address.V4 && address.V4.ip) {
+          if (address.V4?.ip) {
             ipAddresses.push(address.V4.ip)
           }
-          if (address.V6 && address.V6.ip) {
+          if (address.V6?.ip) {
             ipAddresses.push(address.V6.ip)
           }
         })
       })
 
-      // 获取当前系统的主机名
       let hostname = ''
       try {
         hostname = await getSystemHostname()
@@ -277,14 +231,11 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
         console.error('获取主机名失败:', err)
       }
 
-      // 构建选项列表
       const options = ['127.0.0.1', 'localhost']
 
-      // 确保主机名添加到列表，即使它是空字符串也记录下来
       if (hostname) {
-        // 如果主机名不是localhost或127.0.0.1，则添加它
         if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
-          hostname = hostname + '.local'
+          hostname = `${hostname}.local`
           options.push(hostname)
           debugLog('主机名已添加到选项中:', hostname)
         } else {
@@ -294,16 +245,13 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
         debugLog('主机名为空')
       }
 
-      // 添加IP地址
       options.push(...ipAddresses)
 
-      // 去重
       const uniqueOptions = Array.from(new Set(options))
       debugLog('最终选项列表:', uniqueOptions)
       setHostOptions(uniqueOptions)
     } catch (error) {
       console.error('获取网络接口失败:', error)
-      // 失败时至少提供基本选项
       setHostOptions(['127.0.0.1', 'localhost'])
     }
   }
@@ -324,7 +272,6 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
       return
     }
 
-    // 修改验证规则，允许IP和主机名
     const ipv4Regex =
       /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/
     const ipv6Regex =
@@ -368,8 +315,7 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
     let pacContent = value.pac_content
     if (pacContent) {
       pacContent = pacContent.replace(/%proxy_host%/g, value.proxy_host)
-      // 将 mixed-port 转换为字符串
-      const mixedPortStr = (clashConfig?.mixedPort || '').toString()
+      const mixedPortStr = displayedMixedPort.toString()
       pacContent = pacContent.replace(/%mixed-port%/g, mixedPortStr)
     }
 
@@ -377,7 +323,6 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
       patch.pac_file_content = pacContent
     }
 
-    // 处理IPv6地址，如果是IPv6地址但没有被方括号包围，则添加方括号
     let proxyHost = value.proxy_host
     if (
       ipv6Regex.test(proxyHost) &&
@@ -391,54 +336,23 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
       patch.proxy_host = proxyHost
     }
 
-    // 判断是否需要重置系统代理
-    const needResetProxy =
-      value.pac !== proxy_auto_config ||
-      proxyHost !== proxy_host ||
-      pacContent !== pac_file_content ||
-      value.bypass !== system_proxy_bypass ||
-      value.use_default !== use_default_bypass
-
     Promise.resolve().then(async () => {
       try {
-        // 乐观更新本地状态
         if (Object.keys(patch).length > 0) {
           mutateVerge({ ...verge, ...patch }, false)
         }
         if (Object.keys(patch).length > 0) {
           await patchVerge(patch)
         }
-        setTimeout(async () => {
-          try {
-            await invalidateProxyState()
-
-            // 如果需要重置代理且代理当前启用
-            if (needResetProxy && enabled) {
-              const [currentSysProxy, currentAutoProxy] = await Promise.all([
-                getSystemProxy(),
-                getAutotemProxy(),
-              ])
-
-              const isProxyActive = value.pac
-                ? currentAutoProxy?.enable
-                : currentSysProxy?.enable
-
-              if (isProxyActive) {
-                await patchVergeConfig({ enable_system_proxy: false })
-                await new Promise((resolve) => setTimeout(resolve, 50))
-                await patchVergeConfig({ enable_system_proxy: true })
-                await invalidateProxyState()
-              }
-            }
-          } catch (err) {
-            console.warn('代理状态更新失败:', err)
-          }
-        }, 50)
+        try {
+          await invalidateProxyState()
+        } catch (err) {
+          console.warn('代理状态更新失败:', err)
+        }
       } catch (err) {
         console.error('配置保存失败:', err)
         mutateVerge()
         showNotice.error(err)
-        // setOpen(true);
       }
     })
   })
@@ -586,7 +500,6 @@ export const SysproxyViewer = forwardRef<DialogRef>((props, ref) => {
                   setValue((v) => ({
                     ...v,
                     use_default: e,
-                    // 当取消选择use_default且当前bypass为空时，填充默认值
                     bypass: nextBypass,
                   }))
                   return
@@ -696,6 +609,5 @@ const FlexBox = styled('div')`
 
   .label {
     flex: none;
-    //width: 85px;
   }
 `

@@ -3,14 +3,14 @@ use crate::{
     cmd::StringifyErr as _,
     cmd::validate::{ValidationNoticeTarget, handle_validation_notice},
     config::{Config, IProfiles, PrfItem},
+    core::auto_backup::{AutoBackupManager, AutoBackupTrigger},
     core::{
         CoreManager, handle,
         validate::{CoreConfigValidator, ValidationOutcome},
     },
-    module::auto_backup::{AutoBackupManager, AutoBackupTrigger},
     utils::dirs,
 };
-use clash_verge_logging::{Type, logging};
+use clash_verge_logging::{Type, logging, logging_error};
 use smartstring::alias::String;
 use tokio::fs;
 
@@ -40,34 +40,37 @@ pub async fn save_profile_file(index: String, file_data: Option<String>) -> CmdR
         (path, is_merge, is_script, affects_runtime)
     };
 
-    // 读取原始内容（在释放profiles_guard后进行）
-    let original_content = PrfItem {
-        file: Some(rel_path.clone()),
-        ..Default::default()
-    }
-    .read_file()
-    .await
-    .stringify_err()?;
-
     let profiles_dir = dirs::app_profiles_dir().stringify_err()?;
     let file_path = profiles_dir.join(rel_path.as_str());
     let file_path_str = file_path.to_string_lossy().to_string();
 
+    // 读取原始内容（在释放profiles_guard后进行）
+    let original_existed = fs::try_exists(&file_path).await.map_err(|err| {
+        String::from(format!(
+            "failed to check profile file \"{}\": {err}",
+            file_path.display()
+        ))
+    })?;
+    let original_content = if original_existed {
+        PrfItem {
+            file: Some(rel_path.clone()),
+            ..Default::default()
+        }
+        .read_file()
+        .await
+        .stringify_err()?
+    } else {
+        String::new()
+    };
+
     // 保存新的配置文件
     fs::write(&file_path, &file_data).await.stringify_err()?;
-
-    logging!(
-        info,
-        Type::Config,
-        "[cmd配置save] 开始验证配置文件: {}, 是否为merge文件: {}",
-        file_path_str,
-        is_merge_file
-    );
 
     let changes_applied = handle_saved_profile_file(
         &file_path_str,
         &file_path,
         &original_content,
+        original_existed,
         is_merge_file,
         is_script_file,
         affects_runtime,
@@ -83,12 +86,20 @@ pub async fn save_profile_file(index: String, file_data: Option<String>) -> CmdR
     Ok(changes_applied)
 }
 
-async fn restore_original(file_path: &std::path::Path, original_content: &str) -> Result<(), String> {
-    fs::write(file_path, original_content).await.stringify_err()
+async fn restore_original(
+    file_path: &std::path::Path,
+    original_content: &str,
+    original_existed: bool,
+) -> CmdResult<()> {
+    if original_existed {
+        fs::write(file_path, original_content).await.stringify_err()
+    } else {
+        fs::remove_file(file_path).await.stringify_err()
+    }
 }
 
 fn profile_affects_runtime(profiles: &IProfiles, index: &str) -> bool {
-    let Some(current_uid) = profiles.get_current() else {
+    let Some(current_uid) = profiles.current.as_ref() else {
         return false;
     };
     if current_uid == index {
@@ -112,6 +123,7 @@ async fn handle_saved_profile_file(
     file_path_str: &str,
     file_path: &std::path::Path,
     original_content: &str,
+    original_existed: bool,
     is_merge_file: bool,
     is_script_file: bool,
     affects_runtime: bool,
@@ -124,27 +136,17 @@ async fn handle_saved_profile_file(
         (ValidationNoticeTarget::Runtime, "YAML配置文件")
     };
 
-    logging!(
-        info,
-        Type::Config,
-        "[cmd配置save] 开始{}验证: {}",
-        file_type,
-        file_path_str
-    );
-
     match CoreConfigValidator::validate_config_file_outcome(file_path_str, Some(is_merge_file)).await {
-        Ok(outcome) if outcome.is_valid() => {
-            logging!(info, Type::Config, "[cmd配置save] 文件验证通过: {}", file_path_str);
-        }
+        Ok(outcome) if outcome.is_valid() => {}
         Ok(outcome) => {
             logging!(warn, Type::Config, "[cmd配置save] 文件验证失败: {}", outcome);
-            restore_original(file_path, original_content).await?;
+            restore_original(file_path, original_content, original_existed).await?;
             handle_validation_notice(&outcome, target, file_type);
             return Ok(outcome);
         }
         Err(e) => {
-            logging!(error, Type::Config, "[cmd配置save] 验证过程发生错误: {}", e);
-            restore_original(file_path, original_content).await?;
+            logging!(error, Type::Config, "[cmd配置save] 验证过程发生错误: {e:#}");
+            restore_original(file_path, original_content, original_existed).await?;
             return Err(e.to_string().into());
         }
     }
@@ -160,18 +162,19 @@ async fn handle_saved_profile_file(
     );
     match CoreManager::global().update_config_forced().await {
         Ok(outcome) if outcome.is_valid() => {
+            logging_error!(Type::Config, Config::sync_dns_override().await);
             handle::Handle::refresh_clash();
             Ok(ValidationOutcome::Valid)
         }
         Ok(outcome) => {
             logging!(warn, Type::Config, "[cmd配置save] 运行时配置应用失败: {}", outcome);
-            restore_original(file_path, original_content).await?;
+            restore_original(file_path, original_content, original_existed).await?;
             handle_validation_notice(&outcome, ValidationNoticeTarget::Runtime, "运行时配置");
             Ok(outcome)
         }
         Err(err) => {
-            logging!(error, Type::Config, "[cmd配置save] 运行时配置应用错误: {}", err);
-            restore_original(file_path, original_content).await?;
+            logging!(error, Type::Config, "[cmd配置save] 运行时配置应用错误: {err:#}");
+            restore_original(file_path, original_content, original_existed).await?;
             Err(err.to_string().into())
         }
     }

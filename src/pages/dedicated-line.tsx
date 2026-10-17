@@ -29,6 +29,7 @@ import {
 } from 'tauri-plugin-mihomo-api'
 
 import { BasePage } from '@/components/base'
+import { useVerge } from '@/hooks/use-verge'
 import {
   useAppRefreshers,
   useClashConfigData,
@@ -38,17 +39,22 @@ import {
   DedicatedLineConfig,
   getDedicatedLine,
   patchDedicatedLine,
+  recordSelectedNode,
   verifyDedicatedLineIp,
 } from '@/services/cmds'
+import { detectDedicatedLineEntry } from '@/services/dedicated-line'
+import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
 
 // 注入到 proxies 的固定出口节点名（需与后端 enhance/dedicated_line.rs 的默认值一致）
 const EXIT_NAME = '专线出口'
 
 const DedicatedLinePage = () => {
-  const { proxies } = useProxiesData()
+  const { proxyView } = useProxiesData()
   const { clashConfig } = useClashConfigData()
   const { refreshProxy } = useAppRefreshers()
+  const { verge } = useVerge()
+  const [selectedGroup, setSelectedGroup] = useState('')
 
   const [form, setForm] = useState<DedicatedLineConfig>({
     name: EXIT_NAME,
@@ -61,7 +67,7 @@ const DedicatedLinePage = () => {
     skip_cert_verify: false,
     enabled: false,
   })
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [verifying, setVerifying] = useState(false)
   const [dialog, setDialog] = useState<{
     open: boolean
@@ -69,7 +75,7 @@ const DedicatedLinePage = () => {
     ip: string
   }>({ open: false, ok: false, ip: '' })
 
-  const connected = !!form.enabled
+  const connected = !!verge?.dedicated_line?.enabled
 
   // 载入已保存的专线配置
   useEffect(() => {
@@ -84,29 +90,34 @@ const DedicatedLinePage = () => {
           }))
         }
       })
-      .catch(() => {})
+      .catch((error: unknown) => showNotice.error(error))
+      .finally(() => setLoading(false))
   }, [])
 
   // 根据当前模式探测「入口节点 + 作用组」
-  const mode = clashConfig?.mode
-  const detected = useMemo<{ group: string; entry?: string } | null>(() => {
-    if (!proxies) return null
-    if (mode === 'global') {
-      return { group: 'GLOBAL', entry: proxies.global?.now }
-    }
-    const g = proxies.groups?.[0]
-    if (!g) return null
-    return { group: g.name, entry: g.now }
-  }, [proxies, mode])
+  const mode = clashConfig?.mode?.toLowerCase()
+  const groups = useMemo(
+    () => proxyView?.groups.filter((group) => group.type === 'Selector') ?? [],
+    [proxyView],
+  )
+  const detected = useMemo(
+    () => detectDedicatedLineEntry(proxyView, mode, selectedGroup),
+    [proxyView, mode, selectedGroup],
+  )
 
   const update = (patch: Partial<DedicatedLineConfig>) =>
     setForm((prev) => ({ ...prev, ...patch }))
 
   const validateForm = (): string | null => {
     if (!form.server?.trim()) return '请填写专线 IP'
-    if (!form.port || form.port <= 0 || form.port > 65535)
+    if (
+      !form.port ||
+      !Number.isInteger(form.port) ||
+      form.port <= 0 ||
+      form.port > 65535
+    )
       return '请填写有效端口 (1-65535)'
-    if (!form.proxy_type) return '请选择协议'
+    if (!['socks5', 'http'].includes(form.proxy_type ?? '')) return '请选择协议'
     return null
   }
 
@@ -119,12 +130,22 @@ const DedicatedLinePage = () => {
     }
     setLoading(true)
     try {
-      const cfg = { ...form, name: form.name || EXIT_NAME }
-      await patchDedicatedLine(cfg)
+      const cfg = {
+        ...form,
+        server: form.server?.trim(),
+        name: form.name || EXIT_NAME,
+        enabled: connected,
+      }
+      await mutate(() => patchDedicatedLine(cfg), {
+        id: 'patch-verge-config',
+        revalidate: [['getVergeConfig']],
+        errorNotice: false,
+      })
+      await refreshProxy()
       setForm(cfg)
       showNotice.success('专线配置已保存')
-    } catch (e: any) {
-      showNotice.error('保存失败: ' + e)
+    } catch (error: unknown) {
+      showNotice.error(error)
     } finally {
       setLoading(false)
     }
@@ -141,27 +162,57 @@ const DedicatedLinePage = () => {
       showNotice.error('未检测到入口节点，请先在「代理」页选好一个节点')
       return
     }
+    if (localStorage.getItem('proxy-chain-mode-enabled') === 'true') {
+      showNotice.error('请先在「代理」页关闭链式代理模式')
+      return
+    }
+    if (
+      [
+        'DIRECT',
+        'REJECT',
+        'REJECT-DROP',
+        'PASS',
+        form.name || EXIT_NAME,
+      ].includes(detected.entry)
+    ) {
+      showNotice.error('请选择一个有效的代理节点作为入口')
+      return
+    }
     setLoading(true)
     try {
       const cfg: DedicatedLineConfig = {
         ...form,
+        server: form.server?.trim(),
         name: form.name || EXIT_NAME,
         enabled: true,
         entry_node: detected.entry,
         group: detected.group,
       }
       // 写入配置并重新生成核心配置（enhance 注入专线出口 + dialer-proxy）
-      await patchDedicatedLine(cfg)
-      // 选中专线出口
-      await selectNodeForGroup(detected.group, cfg.name as string)
-      await closeAllConnections()
-      await refreshProxy()
+      await mutate(() => patchDedicatedLine(cfg), {
+        id: 'patch-verge-config',
+        revalidate: [['getVergeConfig']],
+        errorNotice: false,
+      })
       setForm(cfg)
+      // 选中专线出口
+      await mutate(
+        async () => {
+          await selectNodeForGroup(detected.group, cfg.name || EXIT_NAME)
+          await recordSelectedNode(detected.group, cfg.name || EXIT_NAME)
+        },
+        { id: `select-proxy-node:${detected.group}`, errorNotice: false },
+      )
+      await mutate(() => closeAllConnections(), {
+        id: 'close-all-connections',
+        errorNotice: false,
+      })
+      await refreshProxy()
       showNotice.success(
         `专线已连接（入口: ${detected.entry} → 出口: ${form.server}）`,
       )
-    } catch (e: any) {
-      showNotice.error('连接失败: ' + e)
+    } catch (error: unknown) {
+      showNotice.error(error)
     } finally {
       setLoading(false)
     }
@@ -171,23 +222,34 @@ const DedicatedLinePage = () => {
   const onDisconnect = useLockFn(async () => {
     setLoading(true)
     try {
-      const group = form.group || 'GLOBAL'
-      const entry = form.entry_node
-      const cfg = { ...form, enabled: false }
-      await patchDedicatedLine(cfg)
+      const saved = verge?.dedicated_line
+      const group = saved?.group || 'GLOBAL'
+      const entry = saved?.entry_node
+      const cfg = { ...saved, enabled: false }
+      await mutate(() => patchDedicatedLine(cfg), {
+        id: 'patch-verge-config',
+        revalidate: [['getVergeConfig']],
+        errorNotice: false,
+      })
+      setForm((previous) => ({ ...previous, enabled: false }))
       if (entry) {
-        try {
-          await selectNodeForGroup(group, entry)
-        } catch {
-          // ignore
-        }
+        await mutate(
+          async () => {
+            await selectNodeForGroup(group, entry)
+            await recordSelectedNode(group, entry)
+          },
+          { id: `select-proxy-node:${group}`, errorNotice: false },
+        )
       }
-      await closeAllConnections()
+      await mutate(() => closeAllConnections(), {
+        id: 'close-all-connections',
+        errorNotice: false,
+      })
       await refreshProxy()
       setForm(cfg)
       showNotice.success('专线已断开')
-    } catch (e: any) {
-      showNotice.error('断开失败: ' + e)
+    } catch (error: unknown) {
+      showNotice.error(error)
     } finally {
       setLoading(false)
     }
@@ -200,8 +262,8 @@ const DedicatedLinePage = () => {
       const ip = await verifyDedicatedLineIp()
       const ok = !!form.server && ip === form.server.trim()
       setDialog({ open: true, ok, ip })
-    } catch (e: any) {
-      showNotice.error('验证失败: ' + e)
+    } catch (error: unknown) {
+      showNotice.error(error)
     } finally {
       setVerifying(false)
     }
@@ -256,6 +318,23 @@ const DedicatedLinePage = () => {
             专线出口配置
           </Typography>
           <Stack spacing={2}>
+            {mode === 'rule' && groups.length > 0 && (
+              <TextField
+                label="作用代理组"
+                select
+                size="small"
+                fullWidth
+                disabled={loading || connected}
+                value={detected?.group || groups[0].name}
+                onChange={(event) => setSelectedGroup(event.target.value)}
+              >
+                {groups.map((group) => (
+                  <MenuItem key={group.name} value={group.name}>
+                    {group.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
             <TextField
               label="协议"
               select
@@ -344,7 +423,7 @@ const DedicatedLinePage = () => {
                   <NetworkCheckRounded />
                 )
               }
-              disabled={verifying}
+              disabled={verifying || loading || !connected}
               onClick={onVerify}
             >
               验证专线

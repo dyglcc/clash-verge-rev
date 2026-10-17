@@ -1,6 +1,5 @@
-use crate::config::Config;
 use crate::constants::{network, tun as tun_const};
-use crate::utils::dirs::{ipc_path, path_to_str};
+use crate::utils::dirs::{path_to_str, sidecar_ipc_path};
 use crate::utils::{dirs, help};
 use anyhow::Result;
 use clash_verge_logging::{Type, logging};
@@ -44,7 +43,11 @@ impl IClashTemp {
                 Self(Self::guard(map))
             }
             Err(err) => {
-                logging!(error, Type::Config, "{err}");
+                logging!(
+                    error,
+                    Type::Config,
+                    "failed to load clash config, using template: {err:#}"
+                );
                 Self::template()
             }
         }
@@ -118,7 +121,7 @@ impl IClashTemp {
         let mixed_port = Self::guard_mixed_port(&config);
         let socks_port = Self::guard_socks_port(&config);
         let port = Self::guard_port(&config);
-        let ctrl = Self::guard_external_controller(&config);
+        let ctrl = Self::guard_server_ctrl(&config);
         #[cfg(unix)]
         let external_controller_unix = Self::guard_external_controller_ipc();
         #[cfg(windows)]
@@ -154,16 +157,6 @@ impl IClashTemp {
         Self::guard_mixed_port(&self.0)
     }
 
-    #[allow(unused)]
-    pub fn get_socks_port(&self) -> u16 {
-        Self::guard_socks_port(&self.0)
-    }
-
-    #[allow(unused)]
-    pub fn get_port(&self) -> u16 {
-        Self::guard_port(&self.0)
-    }
-
     pub fn get_client_info(&self) -> ClashInfo {
         let config = &self.0;
 
@@ -180,8 +173,19 @@ impl IClashTemp {
             }),
         }
     }
+
+    /// 容错读取当前代理模式。
+    ///
+    /// 仅从已保存的 clash 配置 Mapping 中提取 `mode` 字段，不依赖 mihomo `/configs`
+    /// 的严格 `BaseConfig` 反序列化，因此即使核心返回的字段与插件结构体不匹配也能取到。
+    pub fn get_mode(&self) -> Option<String> {
+        self.0.get("mode").and_then(|value| match value {
+            Value::String(val_str) => Some(val_str.clone()),
+            _ => None,
+        })
+    }
     #[cfg(not(target_os = "windows"))]
-    pub fn guard_redir_port(config: &Mapping) -> u16 {
+    fn guard_redir_port(config: &Mapping) -> u16 {
         let mut port = config
             .get("redir-port")
             .and_then(|value| match value {
@@ -197,7 +201,7 @@ impl IClashTemp {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn guard_tproxy_port(config: &Mapping) -> u16 {
+    fn guard_tproxy_port(config: &Mapping) -> u16 {
         let mut port = config
             .get("tproxy-port")
             .and_then(|value| match value {
@@ -212,7 +216,7 @@ impl IClashTemp {
         port
     }
 
-    pub fn guard_mixed_port(config: &Mapping) -> u16 {
+    fn guard_mixed_port(config: &Mapping) -> u16 {
         let raw_value = config.get("mixed-port");
 
         let mut port = raw_value
@@ -221,16 +225,16 @@ impl IClashTemp {
                 Value::Number(val_num) => val_num.as_u64().map(|u| u as u16),
                 _ => None,
             })
-            .unwrap_or(7897);
+            .unwrap_or(network::ports::DEFAULT_MIXED);
 
         if port == 0 {
-            port = 7897;
+            port = network::ports::DEFAULT_MIXED;
         }
 
         port
     }
 
-    pub fn guard_socks_port(config: &Mapping) -> u16 {
+    fn guard_socks_port(config: &Mapping) -> u16 {
         let mut port = config
             .get("socks-port")
             .and_then(|value| match value {
@@ -245,7 +249,7 @@ impl IClashTemp {
         port
     }
 
-    pub fn guard_port(config: &Mapping) -> u16 {
+    fn guard_port(config: &Mapping) -> u16 {
         let mut port = config
             .get("port")
             .and_then(|value| match value {
@@ -260,7 +264,7 @@ impl IClashTemp {
         port
     }
 
-    pub fn guard_server_ctrl(config: &Mapping) -> String {
+    pub(super) fn guard_server_ctrl(config: &Mapping) -> String {
         config
             .get("external-controller")
             .and_then(|value| match value.as_str() {
@@ -279,28 +283,7 @@ impl IClashTemp {
             .unwrap_or_else(|| "127.0.0.1:9097".into())
     }
 
-    pub fn guard_external_controller(config: &Mapping) -> String {
-        // 在初始化阶段，直接返回配置中的值，不进行额外检查
-        // 这样可以避免在配置加载期间的循环依赖
-        Self::guard_server_ctrl(config)
-    }
-
-    pub async fn guard_external_controller_with_setting(config: &Mapping) -> String {
-        // 检查 enable_external_controller 设置，用于运行时配置生成
-        let enable_external_controller = Config::verge()
-            .await
-            .latest_arc()
-            .enable_external_controller
-            .unwrap_or(false);
-
-        if enable_external_controller {
-            Self::guard_server_ctrl(config)
-        } else {
-            "".into()
-        }
-    }
-
-    pub fn guard_client_ctrl(config: &Mapping) -> String {
+    fn guard_client_ctrl(config: &Mapping) -> String {
         let value = Self::guard_server_ctrl(config);
         match SocketAddr::from_str(value.as_str()) {
             Ok(mut socket) => {
@@ -313,9 +296,9 @@ impl IClashTemp {
         }
     }
 
-    pub fn guard_external_controller_ipc() -> String {
+    pub(crate) fn guard_external_controller_ipc() -> String {
         // 总是使用当前的 IPC 路径，确保配置文件与运行时路径一致
-        ipc_path()
+        sidecar_ipc_path()
             .ok()
             .and_then(|path| path_to_str(&path).ok().map(|s| s.into()))
             .unwrap_or_else(|| {
@@ -422,6 +405,7 @@ pub struct IClashDNS {
     pub default_nameserver: Option<Vec<String>>,
     pub enhanced_mode: Option<String>,
     pub fake_ip_range: Option<String>,
+    pub fake_ip_range6: Option<String>,
     pub use_hosts: Option<bool>,
     pub fake_ip_filter: Option<Vec<String>>,
     pub nameserver: Option<Vec<String>>,

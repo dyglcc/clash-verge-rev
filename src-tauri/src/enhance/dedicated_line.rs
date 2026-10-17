@@ -1,4 +1,5 @@
 use crate::config::{Config, DedicatedLineConfig};
+use anyhow::{Result, bail};
 use clash_verge_logging::{Type, logging};
 use serde_yaml_ng::{Mapping, Value};
 
@@ -14,14 +15,18 @@ pub const DEFAULT_EXIT_NAME: &str = "专线出口";
 ///
 /// 因为本函数在每次 `enhance()`（启动、切订阅、改设置）都会执行，
 /// 故只要 `enabled` 仍为 true，重启后链路会自动重建。
-pub async fn apply_dedicated_line(mut config: Mapping) -> Mapping {
+pub async fn apply_dedicated_line(config: Mapping) -> Result<Mapping> {
     let dl = Config::verge().await.latest_arc().dedicated_line.clone();
     let Some(dl) = dl else {
-        return config;
+        return Ok(config);
     };
 
+    apply_config(config, &dl)
+}
+
+fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping> {
     if dl.enabled != Some(true) {
-        return config;
+        return Ok(config);
     }
 
     // 提取并校验必填项
@@ -42,16 +47,49 @@ pub async fn apply_dedicated_line(mut config: Mapping) -> Mapping {
         || group.is_empty()
         || !matches!(proxy_type.as_str(), "socks5" | "http")
     {
-        logging!(
-            warn,
-            Type::Core,
-            "专线代理已启用但配置不完整（type={proxy_type} server={server} port={port} entry={entry_node} group={group}），跳过注入"
-        );
-        return config;
+        bail!("Dedicated line configuration is incomplete or uses an unsupported protocol");
+    }
+    if entry_node == exit_name
+        || entry_node == group
+        || matches!(entry_node.as_str(), "DIRECT" | "REJECT" | "REJECT-DROP" | "PASS")
+    {
+        bail!("Select a proxy node as the dedicated line entry");
+    }
+    if config
+        .get("proxies")
+        .and_then(Value::as_sequence)
+        .is_some_and(|proxies| {
+            proxies
+                .iter()
+                .any(|proxy| proxy.get("name").and_then(Value::as_str) == Some(exit_name.as_str()))
+        })
+        || config
+            .get("proxy-groups")
+            .and_then(Value::as_sequence)
+            .is_some_and(|groups| {
+                groups
+                    .iter()
+                    .any(|item| item.get("name").and_then(Value::as_str) == Some(exit_name.as_str()))
+            })
+    {
+        bail!("Dedicated line exit name conflicts with an existing proxy or group: {exit_name}");
+    }
+    if group != "GLOBAL"
+        && !config
+            .get("proxy-groups")
+            .and_then(Value::as_sequence)
+            .is_some_and(|groups| {
+                groups.iter().any(|item| {
+                    item.get("name").and_then(Value::as_str) == Some(group.as_str())
+                        && item.get("type").and_then(Value::as_str) == Some("select")
+                })
+            })
+    {
+        bail!("Dedicated line target selector no longer exists: {group}");
     }
 
     // 1) 构造专线出口代理并注入 proxies
-    let exit_proxy = build_exit_proxy(&dl, &exit_name, &proxy_type, &server, port, &entry_node);
+    let exit_proxy = build_exit_proxy(dl, &exit_name, &proxy_type, &server, port, &entry_node);
     inject_proxy(&mut config, &exit_name, exit_proxy);
 
     // 2) 加入目标组（以及 GLOBAL）
@@ -65,7 +103,7 @@ pub async fn apply_dedicated_line(mut config: Mapping) -> Mapping {
         Type::Core,
         "专线代理已注入：出口={exit_name} 入口={entry_node} 组={group}"
     );
-    config
+    Ok(config)
 }
 
 /// 构造专线出口代理节点（mihomo proxy 定义）
@@ -135,5 +173,64 @@ fn add_to_group(config: &mut Mapping, group: &str, exit_name: &str) {
         {
             ps.push(Value::from(exit_name));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dedicated_line() -> DedicatedLineConfig {
+        DedicatedLineConfig {
+            enabled: Some(true),
+            proxy_type: Some("socks5".into()),
+            server: Some("192.0.2.1".into()),
+            port: Some(1080),
+            entry_node: Some("entry".into()),
+            group: Some("manual".into()),
+            ..DedicatedLineConfig::default()
+        }
+    }
+
+    fn source() -> Result<Mapping> {
+        Ok(serde_yaml_ng::from_str(
+            "proxies:\n  - {name: entry, type: socks5, server: 192.0.2.2, port: 1080}\nproxy-groups:\n  - {name: manual, type: select, proxies: [entry]}\nrules: ['MATCH,manual']\n",
+        )?)
+    }
+
+    #[test]
+    fn preserves_subscription_and_rebuilds_the_same_chain() -> Result<()> {
+        let original = source()?;
+        let config = apply_config(original.clone(), &dedicated_line())?;
+        let rebuilt = apply_config(original.clone(), &dedicated_line())?;
+        assert_eq!(config, rebuilt);
+        assert_eq!(config["rules"], original["rules"]);
+        assert_eq!(config["proxies"][0], original["proxies"][0]);
+        assert_eq!(config["proxies"][1]["dialer-proxy"].as_str(), Some("entry"));
+        assert_eq!(
+            config["proxy-groups"][0]["proxies"][1].as_str(),
+            Some(DEFAULT_EXIT_NAME)
+        );
+        let disabled = DedicatedLineConfig {
+            enabled: Some(false),
+            ..dedicated_line()
+        };
+        assert_eq!(apply_config(original.clone(), &disabled)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_name_collisions_and_self_referencing_entries() -> Result<()> {
+        let collision = DedicatedLineConfig {
+            name: Some("entry".into()),
+            ..dedicated_line()
+        };
+        assert!(apply_config(source()?, &collision).is_err());
+        let cycle = DedicatedLineConfig {
+            entry_node: Some("manual".into()),
+            ..dedicated_line()
+        };
+        assert!(apply_config(source()?, &cycle).is_err());
+        Ok(())
     }
 }

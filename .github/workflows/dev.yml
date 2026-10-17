@@ -70,11 +70,11 @@ jobs:
 
       - name: Checkout Repository
         if: github.event.inputs[matrix.input] == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust Stable
         if: github.event.inputs[matrix.input] == 'true'
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.99.0
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -101,13 +101,13 @@ jobs:
 
       - name: Install Node
         if: github.event.inputs[matrix.input] == 'true'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: '24.16.0'
+          node-version: '24.21.0'
           cache: 'pnpm'
 
       - name: Pnpm Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.pnpm-store
           key: 'pnpm-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
@@ -125,31 +125,36 @@ jobs:
         if: github.event.inputs[matrix.input] == 'true'
         run: pnpm release-version ${{ env.TAG_NAME }}
 
+      - name: Check dedicated line compatibility
+        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        run: |
+          pnpm typecheck
+          pnpm exec vitest run src/services/dedicated-line.test.ts
+          cargo test --locked -p clash-verge --lib dedicated_line
+
       - name: Add Rust Target
         if: github.event.inputs[matrix.input] == 'true'
         run: |
           # Ensure cross target is installed for the pinned toolchain; fallback without explicit toolchain if needed
-          rustup target add ${{ matrix.target }} --toolchain 1.95.0 || rustup target add ${{ matrix.target }}
+          rustup target add ${{ matrix.target }} --toolchain 1.99.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
           echo "Rust target ${{ matrix.target }} installed."
 
       - name: Tauri build
         if: github.event.inputs[matrix.input] == 'true'
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           NODE_OPTIONS: '--max_old_space_size=4096'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tauriScript: pnpm
           args: --target ${{ matrix.target }} -b ${{ matrix.bundle }}
+
+      - name: Verify Apple Silicon bundle
+        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        run: node scripts/verify-macos-bundle.mjs "target/${{ matrix.target }}/release/bundle/macos/Clash Verge.app" arm64
 
       - name: Upload Artifacts (macOS)
         if: matrix.os == 'macos-latest' && github.event.inputs[matrix.input] == 'true'

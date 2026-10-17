@@ -1,16 +1,18 @@
 import { ipv4, ipv6 } from 'cidr-block'
-import validator from 'validator'
+import isFQDN from 'validator/es/lib/isFQDN'
+import isIP from 'validator/es/lib/isIP'
+import isPort from 'validator/es/lib/isPort'
+import isURL from 'validator/es/lib/isURL'
 
 const stripBrackets = (value: string) =>
   value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value
 
-const isIpv4 = (value: string) => validator.isIP(value, 4)
-const isIpv6 = (value: string) => validator.isIP(value, 6)
-const isHostname = (value: string) =>
-  validator.isFQDN(value, { require_tld: false })
+const isIpv4 = (value: string) => isIP(value, 4)
+const isIpv6 = (value: string) => isIP(value, 6)
+const isHostname = (value: string) => isFQDN(value, { require_tld: false })
 
 export const isValidUrl = (value: string) =>
-  validator.isURL(value.trim(), {
+  isURL(value.trim(), {
     protocols: ['http', 'https'],
     require_protocol: true,
     require_valid_protocol: true,
@@ -18,7 +20,20 @@ export const isValidUrl = (value: string) =>
     require_tld: false,
   })
 
-export const isValidPort = (value: string) => validator.isPort(value.trim())
+export const isValidLatencyTestUrl = (value: string) => {
+  const raw = value.trim()
+  if (!/^https?:\/\//i.test(raw)) return false
+  try {
+    const url = new URL(raw)
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname
+    )
+  } catch {
+    return false
+  }
+}
+
+export const isValidPort = (value: string) => isPort(value.trim())
 
 export const normalizeHost = (value: string): string | null => {
   const host = value.trim()

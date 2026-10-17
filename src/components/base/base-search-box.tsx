@@ -2,7 +2,8 @@ import { ClearRounded } from '@mui/icons-material'
 import { Box, SvgIcon, TextField, styled, IconButton } from '@mui/material'
 import Tooltip from '@mui/material/Tooltip'
 import {
-  ChangeEvent,
+  type ChangeEvent,
+  type MouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -26,6 +27,7 @@ export type SearchState = {
 type SearchOptionState = Omit<SearchState, 'text'>
 
 type SearchProps = {
+  inputRef?: React.RefObject<HTMLInputElement | null>
   value?: string
   defaultValue?: string
   autoFocus?: boolean
@@ -35,6 +37,7 @@ type SearchProps = {
   useRegularExpression?: boolean
   searchState?: Partial<SearchOptionState>
   onSearch: (match: (content: string) => boolean, state: SearchState) => void
+  onClick?: (e: MouseEvent<HTMLDivElement>) => void
 }
 
 const StyledTextField = styled(TextField)(({ theme }) => ({
@@ -71,6 +74,7 @@ const useControllableState = <T,>(options: {
 }
 
 export const BaseSearchBox = ({
+  inputRef,
   value,
   defaultValue,
   autoFocus,
@@ -80,10 +84,19 @@ export const BaseSearchBox = ({
   matchWholeWord: defaultMatchWholeWord = false,
   useRegularExpression: defaultUseRegularExpression = false,
   onSearch,
+  onClick,
 }: SearchProps) => {
   const { t } = useTranslation()
   const onSearchRef = useRef(onSearch)
-  const lastSearchStateRef = useRef<SearchState | null>(null)
+  // 用初始状态初始化，使挂载时的 emitSearch 因状态相同而被跳过，
+  // 从而只在输入内容真正变化时才触发 onSearch（也可避免 StrictMode 下的重复调用）。
+  const lastSearchStateRef = useRef<SearchState | null>({
+    text: value ?? defaultValue ?? '',
+    matchCase: searchState?.matchCase ?? defaultMatchCase,
+    matchWholeWord: searchState?.matchWholeWord ?? defaultMatchWholeWord,
+    useRegularExpression:
+      searchState?.useRegularExpression ?? defaultUseRegularExpression,
+  })
 
   const [text, setText] = useControllableState<string>({
     controlled: value,
@@ -189,6 +202,7 @@ export const BaseSearchBox = ({
   return (
     <Tooltip title={effectiveErrorMessage || ''} placement="bottom-start">
       <StyledTextField
+        inputRef={inputRef}
         autoComplete="new-password"
         hiddenLabel
         fullWidth
@@ -199,6 +213,7 @@ export const BaseSearchBox = ({
         placeholder={placeholder ?? t('shared.placeholders.filter')}
         sx={{ input: { py: 0.65, px: 1.25 } }}
         value={text}
+        onClick={onClick}
         onChange={handleChangeText}
         error={!!effectiveErrorMessage}
         slotProps={{

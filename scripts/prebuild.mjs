@@ -1,25 +1,19 @@
-import { execSync } from 'child_process'
-import { createHash } from 'crypto'
-import fs from 'fs'
-import fsp from 'fs/promises'
-import path from 'path'
-import zlib from 'zlib'
+import { execFileSync, execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+import zlib from 'node:zlib'
 
 import AdmZip from 'adm-zip'
 import { glob } from 'glob'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { extract } from 'tar'
 
+import { resolveServiceRelease } from './service-release.mjs'
 import { log_debug, log_error, log_info, log_success } from './utils.mjs'
 
-/**
- * Prebuild script with optimization features:
- * 1. Skip downloading mihomo core if it already exists (unless --force is used)
- * 2. Cache version information for 1 hour to avoid repeated version checks
- * 3. Use file hash to detect changes and skip unnecessary chmod/copy operations
- * 4. Use --force or -f flag to force re-download and update all resources
- *
- */
+/** Prepares platform resources, caching versions and unchanged files unless `--force` is used. */
 
 const cwd = process.cwd()
 const TEMP_DIR = path.join(cwd, 'node_modules/.verge')
@@ -57,6 +51,9 @@ const ARCH_MAP = {
 const arg1 = process.argv.slice(2)[0]
 const arg2 = process.argv.slice(2)[1]
 const target = arg1 === '--force' || arg1 === '-f' ? arg2 : arg1
+if (process.env.CI && !target) {
+  throw new Error('prebuild requires an explicit target triple in CI')
+}
 const { platform, arch } = target
   ? { platform: PLATFORM_MAP[target], arch: ARCH_MAP[target] }
   : process
@@ -72,9 +69,7 @@ const SIDECAR_DIR = path.join(cwd, 'src-tauri', 'sidecar')
 // Linux service binaries are bundled as externalBin sidecars (see tauri.linux.conf.json)
 const SERVICE_DIR = platform === 'linux' ? SIDECAR_DIR : RESOURCES_DIR
 
-// =======================
-// Version Cache
-// =======================
+// Version cache
 async function loadVersionCache() {
   try {
     if (fs.existsSync(VERSION_CACHE_FILE)) {
@@ -110,9 +105,7 @@ async function setCachedVersion(key, version) {
   await saveVersionCache(cache)
 }
 
-// =======================
-// Hash Cache & File Hash
-// =======================
+// File hash cache
 async function calculateFileHash(filePath) {
   try {
     const fileBuffer = await fsp.readFile(filePath)
@@ -166,9 +159,7 @@ async function updateHashCache(targetPath) {
   }
 }
 
-// =======================
-// Meta maps (stable & alpha)
-// =======================
+// Mihomo release maps
 const META_ALPHA_VERSION_URL =
   'https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt'
 const META_ALPHA_URL_PREFIX = `https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha`
@@ -207,9 +198,7 @@ const META_MAP = {
   'linux-loong64': 'mihomo-linux-loong64',
 }
 
-// =======================
-// Fetch latest versions
-// =======================
+// Release discovery
 async function getLatestAlphaVersion() {
   if (!FORCE) {
     const cached = await getCachedVersion('META_ALPHA_VERSION')
@@ -276,9 +265,6 @@ async function getLatestReleaseVersion() {
   }
 }
 
-// =======================
-// Validate availability
-// =======================
 if (!META_MAP[`${platform}-${arch}`]) {
   throw new Error(`clash meta unsupported platform "${platform}-${arch}"`)
 }
@@ -286,9 +272,6 @@ if (!META_ALPHA_MAP[`${platform}-${arch}`]) {
   throw new Error(`clash meta alpha unsupported platform "${platform}-${arch}"`)
 }
 
-// =======================
-// Build meta objects
-// =======================
 function clashMetaAlpha() {
   const name = META_ALPHA_MAP[`${platform}-${arch}`]
   const isWin = platform === 'win32'
@@ -315,9 +298,6 @@ function clashMeta() {
   }
 }
 
-// =======================
-// download helper (增强：status + magic bytes)
-// =======================
 async function downloadFile(url, outPath) {
   const options = {}
   const httpProxy =
@@ -334,7 +314,6 @@ async function downloadFile(url, outPath) {
   })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
-    // 将 body 写到文件以便排查（可通过临时目录查看）
     await fsp.mkdir(path.dirname(outPath), { recursive: true })
     await fsp.writeFile(outPath, body)
     throw new Error(`Failed to download ${url}: status ${response.status}`)
@@ -343,7 +322,6 @@ async function downloadFile(url, outPath) {
   const buf = Buffer.from(await response.arrayBuffer())
   await fsp.mkdir(path.dirname(outPath), { recursive: true })
 
-  // 简单 magic 字节检查
   if (url.endsWith('.gz') || url.endsWith('.tgz')) {
     if (!(buf[0] === 0x1f && buf[1] === 0x8b)) {
       await fsp.writeFile(outPath, buf)
@@ -364,9 +342,6 @@ async function downloadFile(url, outPath) {
   log_success(`download finished: ${url}`)
 }
 
-// =======================
-// resolveSidecar (支持 zip / tgz / gz)
-// =======================
 async function resolveSidecar(binInfo) {
   const { name, targetFile, zipFile, exeFile, downloadURL } = binInfo
   const sidecarPath = path.join(SIDECAR_DIR, targetFile)
@@ -393,11 +368,9 @@ async function resolveSidecar(binInfo) {
         log_debug(`"${name}" entry: ${entry.entryName}`)
       })
       zip.extractAllTo(tempDir, true)
-      // 尝试按 exeFile 重命名，否则找第一个可执行文件
       if (fs.existsSync(tempExe)) {
         await fsp.rename(tempExe, sidecarPath)
       } else {
-        // 搜索候选
         const files = await fsp.readdir(tempDir)
         const candidate = files.find(
           (f) =>
@@ -409,13 +382,12 @@ async function resolveSidecar(binInfo) {
           throw new Error(`Expected binary not found in ${tempDir}`)
         await fsp.rename(path.join(tempDir, candidate), sidecarPath)
       }
-      if (platform !== 'win32') execSync(`chmod 755 ${sidecarPath}`)
+      if (platform !== 'win32') await fsp.chmod(sidecarPath, 0o755)
       log_success(`unzip finished: "${name}"`)
     } else if (zipFile.endsWith('.tgz')) {
       await extract({ cwd: tempDir, file: tempZip })
       const files = await fsp.readdir(tempDir)
       log_debug(`"${name}" extracted files:`, files)
-      // 优先寻找给定 exeFile 或已知前缀
       let extracted = files.find(
         (f) =>
           f === path.basename(exeFile) ||
@@ -425,10 +397,9 @@ async function resolveSidecar(binInfo) {
       if (!extracted) extracted = files[0]
       if (!extracted) throw new Error(`Expected file not found in ${tempDir}`)
       await fsp.rename(path.join(tempDir, extracted), sidecarPath)
-      execSync(`chmod 755 ${sidecarPath}`)
+      await fsp.chmod(sidecarPath, 0o755)
       log_success(`tgz processed: "${name}"`)
     } else {
-      // .gz
       const readStream = fs.createReadStream(tempZip)
       const writeStream = fs.createWriteStream(sidecarPath)
       await new Promise((resolve, reject) => {
@@ -440,7 +411,8 @@ async function resolveSidecar(binInfo) {
           })
           .pipe(writeStream)
           .on('finish', () => {
-            if (platform !== 'win32') execSync(`chmod 755 ${sidecarPath}`)
+            if (platform !== 'win32')
+              execFileSync('chmod', ['755', sidecarPath])
             resolve()
           })
           .on('error', (e) => {
@@ -491,7 +463,7 @@ async function resolveResource(binInfo) {
   log_success(`${file} finished`)
 }
 
-// SimpleSC.dll (win plugin)
+// Windows NSIS plugin
 const resolvePlugin = async () => {
   const url =
     'https://nsis.sourceforge.io/mediawiki/images/e/ef/NSIS_Simple_Service_Plugin_Unicode_1.30.zip'
@@ -513,13 +485,12 @@ const resolvePlugin = async () => {
     const zip = new AdmZip(tempZip)
     zip
       .getEntries()
-      .forEach((entry) => log_debug(`"SimpleSC" entry`, entry.entryName))
+      .forEach((entry) => void log_debug(`"SimpleSC" entry`, entry.entryName))
     zip.extractAllTo(tempDir, true)
     if (fs.existsSync(tempDll)) {
       await fsp.cp(tempDll, pluginPath, { recursive: true, force: true })
       log_success(`unzip finished: "SimpleSC"`)
     } else {
-      // 如果 dll 名称不同，尝试找到 dll
       const files = await fsp.readdir(tempDir)
       const dll = files.find((f) => f.toLowerCase().endsWith('.dll'))
       if (dll) {
@@ -537,7 +508,7 @@ const resolvePlugin = async () => {
   }
 }
 
-// service chmod (保留并使用 glob)
+// Service executable permissions
 const resolveServicePermission = async () => {
   const serviceExecutables = [
     'clash-verge-service*',
@@ -573,15 +544,7 @@ const resolveServicePermission = async () => {
   }
 }
 
-// =======================
-// Other resource resolvers (service, mmdb, geosite, geoip, enableLoopback)
-// =======================
-const SERVICE_LATEST_URL =
-  'https://github.com/clash-verge-rev/clash-verge-service-ipc/releases/latest'
-const SERVICE_URL_PREFIX =
-  'https://github.com/clash-verge-rev/clash-verge-service-ipc/releases/download'
-let SERVICE_VERSION
-
+// Other resources
 const SERVICE_BINARIES = [
   'clash-verge-service',
   'clash-verge-service-install',
@@ -590,57 +553,10 @@ const SERVICE_BINARIES = [
 
 function serviceFileInfo(name) {
   const ext = platform === 'win32' ? '.exe' : ''
-  const suffix = platform === 'linux' ? '-' + SIDECAR_HOST : ''
+  const suffix = platform === 'linux' ? `-${SIDECAR_HOST}` : ''
   return {
     sourceFile: `${name}${ext}`,
     targetFile: `${name}${suffix}${ext}`,
-  }
-}
-
-function parseServiceVersionFromUrl(url) {
-  const match = url.match(/\/releases\/tag\/([^/?#]+)/)
-  return match ? decodeURIComponent(match[1]) : null
-}
-
-async function getLatestServiceVersion() {
-  if (!FORCE) {
-    const cached = await getCachedVersion('SERVICE_VERSION')
-    if (cached) {
-      SERVICE_VERSION = cached
-      return
-    }
-  }
-
-  const options = {}
-  const httpProxy =
-    process.env.HTTP_PROXY ||
-    process.env.http_proxy ||
-    process.env.HTTPS_PROXY ||
-    process.env.https_proxy
-  if (httpProxy) options.agent = new HttpsProxyAgent(httpProxy)
-
-  try {
-    const response = await fetch(SERVICE_LATEST_URL, {
-      ...options,
-      method: 'GET',
-      redirect: 'follow',
-    })
-    if (!response.ok)
-      throw new Error(
-        `Failed to fetch ${SERVICE_LATEST_URL}: ${response.status}`,
-      )
-
-    SERVICE_VERSION = parseServiceVersionFromUrl(response.url)
-    if (!SERVICE_VERSION)
-      throw new Error(
-        `Unable to resolve service release tag from ${response.url}`,
-      )
-
-    log_info(`Latest service version: ${SERVICE_VERSION}`)
-    await setCachedVersion('SERVICE_VERSION', SERVICE_VERSION)
-  } catch (err) {
-    log_error('Error fetching latest service version:', err.message)
-    process.exit(1)
   }
 }
 
@@ -666,16 +582,50 @@ async function resolveServiceBundle() {
     }
   })
 
-  if (!FORCE && files.every(({ targetPath }) => fs.existsSync(targetPath))) {
-    log_success('"clash-verge-service-ipc" already exists, skipping download')
+  const cargoManifest = await fsp.readFile(
+    path.join(cwd, 'src-tauri', 'Cargo.toml'),
+    'utf8',
+  )
+  const serviceDependency = cargoManifest
+    .split(/\r?\n/)
+    .find((line) => line.trimStart().startsWith('clash_verge_service_ipc ='))
+  const sourcePath = serviceDependency?.match(/\bpath\s*=\s*"([^"]+)"/)?.[1]
+  if (sourcePath) {
+    const manifest = path.resolve(cwd, 'src-tauri', sourcePath, 'Cargo.toml')
+    const targetDirectory = path.join(cwd, 'target', 'bundled-service')
+    execFileSync(
+      'cargo',
+      [
+        'build',
+        '--manifest-path',
+        manifest,
+        '--target-dir',
+        targetDirectory,
+        '--target',
+        SIDECAR_HOST,
+        '--release',
+        '--features',
+        'standalone,client',
+        '--bins',
+      ],
+      { stdio: 'inherit' },
+    )
+    await fsp.mkdir(SERVICE_DIR, { recursive: true })
+    for (const { sourceFile, targetPath } of files) {
+      await fsp.copyFile(
+        path.join(targetDirectory, SIDECAR_HOST, 'release', sourceFile),
+        targetPath,
+      )
+      if (platform !== 'win32') await fsp.chmod(targetPath, 0o755)
+      await updateHashCache(targetPath)
+    }
     return
   }
-
-  await getLatestServiceVersion()
-
-  const archiveExt = platform === 'win32' ? 'zip' : 'tar.gz'
-  const archiveFile = `clash-verge-service-ipc-${SERVICE_VERSION}-${SIDECAR_HOST}.${archiveExt}`
-  const downloadURL = `${SERVICE_URL_PREFIX}/${SERVICE_VERSION}/${archiveFile}`
+  const { archiveFile, downloadURL } = resolveServiceRelease(
+    cargoManifest,
+    SIDECAR_HOST,
+    platform,
+  )
   const tempDir = path.join(TEMP_DIR, 'clash-verge-service-ipc')
   const tempArchive = path.join(tempDir, archiveFile)
 
@@ -689,8 +639,9 @@ async function resolveServiceBundle() {
       const zip = new AdmZip(tempArchive)
       zip
         .getEntries()
-        .forEach((entry) =>
-          log_debug('"clash-verge-service-ipc" entry:', entry.entryName),
+        .forEach(
+          (entry) =>
+            void log_debug('"clash-verge-service-ipc" entry:', entry.entryName),
         )
       zip.extractAllTo(tempDir, true)
     } else {
@@ -715,10 +666,41 @@ async function resolveServiceBundle() {
   }
 }
 
+/// The NSIS installer publishes the bundled cores into the service's approved directory and must
+/// attest exactly the bytes it unpacked. The digests are computed here, where the sidecars land,
+/// and reach installer.nsi through the installerHooks include (see tauri.windows.conf.json).
+const CORE_HASHES_NSH = path.join(
+  cwd,
+  'src-tauri',
+  'packages',
+  'windows',
+  'core-hashes.nsh',
+)
+async function resolveCoreHashes() {
+  const lines = []
+  for (const [define, name] of [
+    ['MIHOMO_SHA256', 'verge-mihomo'],
+    ['MIHOMO_ALPHA_SHA256', 'verge-mihomo-alpha'],
+  ]) {
+    const sidecar = path.join(SIDECAR_DIR, `${name}-${SIDECAR_HOST}.exe`)
+    const digest = createHash('sha256')
+      .update(await fsp.readFile(sidecar))
+      .digest('hex')
+    lines.push(`!define ${define} "${digest}"`)
+  }
+  await fsp.writeFile(CORE_HASHES_NSH, `${lines.join('\n')}\n`)
+  log_success(`Generated ${CORE_HASHES_NSH}`)
+}
+
 const resolveMmdb = () =>
   resolveResource({
     file: 'Country.mmdb',
     downloadURL: `https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb`,
+  })
+const resolveASNMmdb = () =>
+  resolveResource({
+    file: 'ASN.mmdb',
+    downloadURL: `https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb`,
   })
 const resolveGeosite = () =>
   resolveResource({
@@ -747,9 +729,6 @@ const resolveUnSetDnsScript = () =>
     localPath: path.join(cwd, 'scripts/unset_dns.sh'),
   })
 
-// =======================
-// Tasks
-// =======================
 const tasks = [
   {
     name: 'verge-mihomo-alpha',
@@ -763,9 +742,12 @@ const tasks = [
       getLatestReleaseVersion().then(() => resolveSidecar(clashMeta())),
     retry: 5,
   },
+  // After both sidecar tasks: it hashes what they downloaded.
+  { name: 'core_hashes', func: resolveCoreHashes, retry: 1, winOnly: true },
   { name: 'plugin', func: resolvePlugin, retry: 5, winOnly: true },
   { name: 'service', func: resolveServiceBundle, retry: 5 },
   { name: 'mmdb', func: resolveMmdb, retry: 5 },
+  { name: 'asn_mmdb', func: resolveASNMmdb, retry: 5 },
   { name: 'geosite', func: resolveGeosite, retry: 5 },
   { name: 'geoip', func: resolveGeoIP, retry: 5 },
   {
