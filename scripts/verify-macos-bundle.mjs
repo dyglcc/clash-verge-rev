@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const [bundle, expectedArch] = process.argv.slice(2)
@@ -13,7 +15,8 @@ if (
   )
 }
 
-const app = path.resolve(bundle)
+const installer = path.resolve(bundle)
+let app = installer
 const machoMagic = new Set([
   'cffaedfe',
   'cefaedfe',
@@ -57,31 +60,65 @@ function inspect(directory) {
   }
 }
 
-inspect(path.join(app, 'Contents'))
-if (!binaries.some((file) => file.includes(`${path.sep}MacOS${path.sep}`))) {
-  throw new Error('The app bundle contains no Mach-O executable')
-}
-execFileSync(
-  'codesign',
-  ['--verify', '--deep', '--strict', '--verbose=2', app],
-  { stdio: 'inherit' },
-)
-for (const name of ['verge-mihomo', 'verge-mihomo-alpha']) {
-  const core = binaries.find((file) => path.basename(file) === name)
-  if (!core) throw new Error(`Missing bundled core: ${name}`)
+function verifyBundle() {
+  inspect(path.join(app, 'Contents'))
+  if (!binaries.some((file) => file.includes(`${path.sep}MacOS${path.sep}`))) {
+    throw new Error('The app bundle contains no Mach-O executable')
+  }
+  execFileSync(
+    'codesign',
+    ['--verify', '--deep', '--strict', '--verbose=2', app],
+    { stdio: 'inherit' },
+  )
+  for (const name of ['verge-mihomo', 'verge-mihomo-alpha']) {
+    const core = binaries.find((file) => path.basename(file) === name)
+    if (!core) throw new Error(`Missing bundled core: ${name}`)
+    console.log(
+      execFileSync(core, ['-v'], { encoding: 'utf8', timeout: 15000 }).trim(),
+    )
+  }
+  for (const name of [
+    'clash-verge-service',
+    'clash-verge-service-install',
+    'clash-verge-service-uninstall',
+  ]) {
+    if (!binaries.some((file) => path.basename(file) === name)) {
+      throw new Error(`Missing bundled service executable: ${name}`)
+    }
+  }
   console.log(
-    execFileSync(core, ['-v'], { encoding: 'utf8', timeout: 15000 }).trim(),
+    `Verified ${binaries.length} Mach-O binaries for ${expectedArch}. Physical M5 testing and Gatekeeper assessment are separate checks.`,
   )
 }
-for (const name of [
-  'clash-verge-service',
-  'clash-verge-service-install',
-  'clash-verge-service-uninstall',
-]) {
-  if (!binaries.some((file) => path.basename(file) === name)) {
-    throw new Error(`Missing bundled service executable: ${name}`)
+
+if (installer.endsWith('.dmg')) {
+  const mount = fs.mkdtempSync(path.join(os.tmpdir(), 'cvr-macos-verify-'))
+  let attached = false
+  try {
+    execFileSync(
+      'hdiutil',
+      ['attach', '-readonly', '-nobrowse', '-mountpoint', mount, installer],
+      { stdio: 'inherit' },
+    )
+    attached = true
+    const apps = fs.readdirSync(mount).filter((name) => name.endsWith('.app'))
+    if (apps.length !== 1)
+      throw new Error(`Expected one app in the DMG, found ${apps.length}`)
+    app = path.join(mount, apps[0])
+    verifyBundle()
+    const checksum = createHash('sha256')
+      .update(fs.readFileSync(installer))
+      .digest('hex')
+    fs.writeFileSync(
+      `${installer}.sha256`,
+      `${checksum}  ${path.basename(installer)}\n`,
+    )
+    console.log(`DMG SHA-256: ${checksum}`)
+  } finally {
+    if (attached)
+      execFileSync('hdiutil', ['detach', mount], { stdio: 'inherit' })
+    fs.rmdirSync(mount)
   }
+} else {
+  verifyBundle()
 }
-console.log(
-  `Verified ${binaries.length} Mach-O binaries for ${expectedArch}. Physical M5 testing and Gatekeeper assessment are separate checks.`,
-)

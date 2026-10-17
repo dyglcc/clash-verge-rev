@@ -80,6 +80,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event.inputs[matrix.input] == 'true' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feature/dedicated-line') }}
+          cache-on-failure: true
           prefix-key: 'v1-rust'
           key: 'rust-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
           workspaces: |
@@ -115,6 +116,29 @@ jobs:
             pnpm-shared-stable-${{ matrix.os }}-${{ matrix.target }}
           lookup-only: true
 
+      - name: Test DMG verification before compiling
+        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        shell: bash
+        run: |
+          fixture=$(mktemp -d "$RUNNER_TEMP/cvr-verifier.XXXXXX")
+          app="$fixture/Fixture.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/resources"
+          printf '%s\n' '#include <stdio.h>' 'int main(void) { puts("verifier fixture"); return 0; }' > "$RUNNER_TEMP/cvr-verifier.c"
+          clang -arch arm64 "$RUNNER_TEMP/cvr-verifier.c" -o "$app/Contents/MacOS/clash-verge"
+          for name in verge-mihomo verge-mihomo-alpha; do
+            cp "$app/Contents/MacOS/clash-verge" "$app/Contents/MacOS/$name"
+          done
+          for name in clash-verge-service clash-verge-service-install clash-verge-service-uninstall; do
+            cp "$app/Contents/MacOS/clash-verge" "$app/Contents/Resources/resources/$name"
+          done
+          plutil -create xml1 "$app/Contents/Info.plist"
+          plutil -insert CFBundleExecutable -string clash-verge "$app/Contents/Info.plist"
+          plutil -insert CFBundleIdentifier -string local.cvr.verifier "$app/Contents/Info.plist"
+          plutil -insert CFBundlePackageType -string APPL "$app/Contents/Info.plist"
+          codesign --force --deep --sign - "$app"
+          hdiutil create -volname VerifierFixture -srcfolder "$fixture" -format UDZO "$RUNNER_TEMP/cvr-verifier.dmg"
+          node scripts/verify-macos-bundle.mjs "$RUNNER_TEMP/cvr-verifier.dmg" arm64
+
       - name: Pnpm install and check
         if: github.event.inputs[matrix.input] == 'true'
         run: |
@@ -125,13 +149,6 @@ jobs:
         if: github.event.inputs[matrix.input] == 'true'
         run: pnpm release-version ${{ env.TAG_NAME }}
 
-      - name: Check dedicated line compatibility
-        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
-        run: |
-          pnpm web:build
-          pnpm test
-          cargo test --locked --release -p clash-verge --lib dedicated_line
-
       - name: Add Rust Target
         if: github.event.inputs[matrix.input] == 'true'
         run: |
@@ -139,6 +156,13 @@ jobs:
           rustup target add ${{ matrix.target }} --toolchain 1.99.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
           echo "Rust target ${{ matrix.target }} installed."
+
+      - name: Check dedicated line compatibility
+        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        run: |
+          pnpm web:build
+          pnpm test
+          cargo test --locked --release --target ${{ matrix.target }} -p clash-verge --lib dedicated_line
 
       - name: Tauri build
         if: github.event.inputs[matrix.input] == 'true'
@@ -154,14 +178,19 @@ jobs:
 
       - name: Verify Apple Silicon bundle
         if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
-        run: node scripts/verify-macos-bundle.mjs "target/${{ matrix.target }}/release/bundle/macos/Clash Verge.app" arm64
+        run: |
+          for installer in target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+            node scripts/verify-macos-bundle.mjs "$installer" arm64
+          done
 
       - name: Upload Artifacts (macOS)
-        if: matrix.os == 'macos-latest' && github.event.inputs[matrix.input] == 'true'
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && github.event.inputs[matrix.input] == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           archive: false
-          path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          path: |
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/dmg/*.sha256
           if-no-files-found: error
 
       - name: Upload Artifacts (Windows)

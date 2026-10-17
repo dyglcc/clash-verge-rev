@@ -16,4 +16,6 @@ The ordering follows the reported launch-time symptom, the previous build config
 
 Ad-hoc signing makes the bundle structurally signed; it does not supply Developer ID trust or Apple notarization. A successful Apple Silicon runner build is not an M5 hardware test.
 
+The old job's detailed logs returned HTTP 410 on 2026-10-17, so its original `codesign` output could not be recovered. The rebuilt branch has passed its macOS native compatibility stage in run `39038471140`; bundle signing and architecture checks follow packaging.
+
 References: [Apple: Safely open apps](https://support.apple.com/102445), [Tauri: macOS code signing](https://v2.tauri.app/distribute/sign/macos/).

@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn rejects_name_collisions_and_self_referencing_entries() -> Result<()> {
         let collision = DedicatedLineConfig {
-            name: Some("entry".into()),
+            name: Some("manual".into()),
             ..dedicated_line()
         };
         assert!(apply_config(source()?, &collision).is_err());
