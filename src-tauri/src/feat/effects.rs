@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn dedicated_line_changes_reload_the_core_config() {
         let patch = verge_patch(|patch| patch.dedicated_line = Some(Default::default()));
-        assert_eq!(verge_effects(&patch), [Effect::ClashConfig].into_iter().collect());
+        assert_eq!(verge_effects(&patch), std::iter::once(Effect::ClashConfig).collect());
     }
 
     fn clash_mapping(pairs: &[(&str, &str)]) -> serde_yaml_ng::Mapping {

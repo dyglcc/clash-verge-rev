@@ -82,6 +82,7 @@ const DedicatedLinePage = () => {
     getDedicatedLine()
       .then((cfg) => {
         if (cfg) {
+          setSelectedGroup(cfg.group || '')
           setForm((prev) => ({
             ...prev,
             ...cfg,
@@ -299,7 +300,8 @@ const DedicatedLinePage = () => {
             color="text.secondary"
             sx={{ mt: 1, wordBreak: 'break-all' }}
           >
-            当前模式：{mode || '未知'} | 作用组：{detected?.group || '—'}
+            当前模式：{mode || '未知'} | 作用组：
+            {(connected ? form.group : detected?.group) || '—'}
             <br />
             检测到的入口节点：
             {detected?.entry || '（未选择，请先到代理页选节点）'}

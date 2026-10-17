@@ -79,7 +79,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.event.inputs[matrix.input] == 'true' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feature/dedicated-line') }}
           prefix-key: 'v1-rust'
           key: 'rust-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
           workspaces: |
