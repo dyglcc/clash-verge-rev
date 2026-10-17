@@ -11,7 +11,7 @@ if (
   !['arm64', 'x86_64'].includes(expectedArch)
 ) {
   throw new Error(
-    'Usage on macOS: node scripts/verify-macos-bundle.mjs <app bundle> <arm64|x86_64>',
+    'Usage on macOS: node scripts/verify-macos-bundle.mjs <app bundle or dmg> <arm64|x86_64>',
   )
 }
 
