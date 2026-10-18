@@ -23,6 +23,18 @@ on:
         required: false
         type: boolean
         default: true
+      publish_run_id:
+        description: 'Existing run containing a verified macos-aarch64 artifact'
+        required: false
+        type: string
+      publish_release_tag:
+        description: 'Existing draft release tag for a dedicated-line build'
+        required: false
+        type: string
+      publish_expected_sha256:
+        description: 'Verified DMG SHA-256 required when publishing an existing run'
+        required: false
+        type: string
 
 permissions: write-all
 env:
@@ -36,7 +48,41 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  publish_existing_macos:
+    if: inputs.publish_release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+      RELEASE_TAG: ${{ inputs.publish_release_tag }}
+      EXPECTED_SHA256: ${{ inputs.publish_expected_sha256 }}
+    steps:
+      - name: Upload verified macOS artifact to draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^dedicated-line-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]]
+          gh run download "$SOURCE_RUN_ID" --name macos-aarch64 --dir package
+          shopt -s nullglob
+          installers=(package/*.dmg)
+          [[ ${#installers[@]} -eq 1 ]]
+          installer="${installers[0]}"
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$installer" | sha256sum --check -
+          name="$(basename "$installer")"
+          name="${name// /.}"
+          checksum="package/$name.sha256"
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$name" > "$checksum"
+          gh release upload "$RELEASE_TAG" "$installer" "$checksum" --clobber
+
   dev:
+    if: inputs.publish_release_tag == ''
     strategy:
       fail-fast: false
       matrix:
