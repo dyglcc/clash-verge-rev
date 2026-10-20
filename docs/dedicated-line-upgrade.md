@@ -73,6 +73,8 @@ On Windows, actual Mihomo `v1.19.32` was tested with two distinct client executa
 
 The mock servers observed six entry connections, six dedicated-exit connections, one normal global-proxy connection and two direct target connections. All cases passed. This establishes process matching and two-hop routing through the real core; it does not establish Bookmap's executable choice or connectivity to the user's real dedicated server.
 
+UDP was tested separately with a real SOCKS5 UDP association. Mihomo skips matched adapters that do not support UDP; without terminal rejection rules, an HTTP dedicated exit and an HTTP GLOBAL selector could fall through to DIRECT. This behavior was reproduced, then corrected with per-application rejection guards and a terminal global-mode rejection. The selected executable's UDP stayed blocked in all three modes; unselected UDP stayed blocked with an HTTP global proxy and followed the original direct routing in rule/direct modes. Only the two expected unselected direct UDP packets reached the local UDP server. Use UDP-capable SOCKS5 entry and exit servers when the selected application needs UDP.
+
 Frontend type checking, the production build, linting and architecture checks passed; Vitest passed all 48 tests. All six dedicated-line backend tests passed, including the Windows process picker finding the test executable. Strict Clippy passed both the scoped check and the repository's all-target/all-feature pre-push check. The pre-push Knip check still reports only the existing, unchanged upstream `readLegacyTestUrls` export described above.
 
 Installer build results will be recorded after the new Windows and macOS ARM64 builds finish. Release `dedicated-line-v2.5.8.1` predates this application-list feature.

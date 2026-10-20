@@ -129,7 +129,7 @@ const DedicatedLinePage = () => {
   const update = (patch: Partial<DedicatedLineConfig>) =>
     setForm((prev) => ({ ...prev, ...patch }))
 
-  const validateForm = (): string | null => {
+  const validateForm = (requireTun = false): string | null => {
     if (!form.server?.trim()) return '请填写专线 IP'
     if (
       !form.port ||
@@ -141,6 +141,8 @@ const DedicatedLinePage = () => {
     if (!['socks5', 'http'].includes(form.proxy_type ?? '')) return '请选择协议'
     if (applicationOnly && !form.applications?.length)
       return '请至少添加一个走专线的应用'
+    if (requireTun && applicationOnly && !verge?.enable_tun_mode)
+      return '请先开启虚拟网卡（TUN）模式，再启用应用专线'
     if (
       applicationOnly &&
       form.applications?.some((application) => /[,\r\n]/.test(application.path))
@@ -151,7 +153,7 @@ const DedicatedLinePage = () => {
 
   // 保存配置（不改变连接状态）
   const onSave = useLockFn(async () => {
-    const err = validateForm()
+    const err = validateForm(connected)
     if (err) {
       showNotice.error(err)
       return
@@ -223,17 +225,13 @@ const DedicatedLinePage = () => {
 
   // 连接专线：入口=当前选中节点，出口=专线 IP
   const onConnect = useLockFn(async () => {
-    const err = validateForm()
+    const err = validateForm(true)
     if (err) {
       showNotice.error(err)
       return
     }
     if (!detected?.entry) {
       showNotice.error('未检测到入口节点，请先在「代理」页选好一个节点')
-      return
-    }
-    if (applicationOnly && !verge?.enable_tun_mode) {
-      showNotice.error('请先开启虚拟网卡（TUN）模式，再连接应用专线')
       return
     }
     if (localStorage.getItem('proxy-chain-mode-enabled') === 'true') {
@@ -371,8 +369,20 @@ const DedicatedLinePage = () => {
           >
             <Typography variant="h6">专线状态</Typography>
             <Chip
-              label={connected ? '已连接' : '未连接'}
-              color={connected ? 'success' : 'default'}
+              label={
+                connected
+                  ? applicationOnly && !verge?.enable_tun_mode
+                    ? '等待开启 TUN'
+                    : '已连接'
+                  : '未连接'
+              }
+              color={
+                connected
+                  ? applicationOnly && !verge?.enable_tun_mode
+                    ? 'warning'
+                    : 'success'
+                  : 'default'
+              }
               size="small"
             />
           </Box>
@@ -523,6 +533,13 @@ const DedicatedLinePage = () => {
               value={form.server || ''}
               onChange={(e) => update({ server: e.target.value })}
             />
+            {applicationOnly && form.proxy_type === 'http' && (
+              <Alert severity="info">
+                HTTP 专线不支持 UDP。相关 UDP
+                流量会被阻断，不会回退到普通线路；需要 UDP 时，请使用支持 UDP 的
+                SOCKS5 入口和出口。
+              </Alert>
+            )}
             <TextField
               label="端口"
               size="small"

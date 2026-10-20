@@ -169,6 +169,8 @@ fn apply_application_rules(config: &mut Mapping, dl: &DedicatedLineConfig, exit_
             bail!("Application paths must be nonempty and cannot contain commas or newlines");
         }
         rules.push(Value::from(format!("PROCESS-PATH,{path},{exit_name}")));
+        // Mihomo skips adapters without UDP support; selected apps must not fall through.
+        rules.push(Value::from(format!("PROCESS-PATH,{path},REJECT")));
     }
     // Native global/direct modes bypass process rules, so preserve their fallback in rule mode.
     match config
@@ -178,7 +180,10 @@ fn apply_application_rules(config: &mut Mapping, dl: &DedicatedLineConfig, exit_
         .to_ascii_lowercase()
         .as_str()
     {
-        "global" => rules.push("MATCH,GLOBAL".into()),
+        "global" => {
+            rules.push("MATCH,GLOBAL".into());
+            rules.push("MATCH,REJECT".into());
+        }
         "direct" => rules.push("MATCH,DIRECT".into()),
         "rule" => {
             if let Some(existing) = config.get("rules").and_then(Value::as_sequence) {
@@ -347,7 +352,14 @@ mod tests {
                 "direct" => "MATCH,DIRECT",
                 _ => "MATCH,manual",
             };
-            assert_eq!(config["rules"][1], Value::from(fallback));
+            assert_eq!(
+                config["rules"][1],
+                Value::from(r"PROCESS-PATH,C:\Bookmap\jre\bin\javaw.exe,REJECT")
+            );
+            assert_eq!(config["rules"][2], Value::from(fallback));
+            if mode == "global" {
+                assert_eq!(config["rules"][3], Value::from("MATCH,REJECT"));
+            }
             assert_eq!(config["proxy-groups"], original["proxy-groups"]);
             assert_eq!(config["proxies"][1]["dialer-proxy"], Value::from("entry"));
         }
