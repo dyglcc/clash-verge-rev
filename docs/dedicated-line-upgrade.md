@@ -103,8 +103,20 @@ Domain matching precedes application matching. Each dedicated rule retains its t
 
 The existing `applications` scope value is preserved for saved configuration compatibility, with an optional `domains` list added to the dedicated-line configuration. Existing application-only and all-traffic configurations keep their behavior. Selective routing requires at least one domain or application. Domain-only routing can use a browser's system proxy without TUN; process fallback still requires TUN. Domain rules require the core to know the request's hostname, as with existing subscription domain rules. Neither this feature nor the application fallback discovers unrelated login domains automatically.
 
-After saving, reconnect the login page and target application so existing HTTP connections are rebuilt. Application routing uses the full executable path and does not identify browser tabs, profiles or login sessions. No live user settings or applications were changed during development of this update.
+After saving, restart the target application and the browser used for login so existing HTTP connections are rebuilt; refreshing a page can reuse an old pooled connection. Application routing uses the full executable path and does not identify browser tabs, profiles or login sessions. No live user settings or applications were changed during development of this update.
 
 Local Windows validation passed all 50 frontend tests and eight dedicated-line backend tests, TypeScript checking, the production frontend build, changed-file linting and formatting, and the architecture gates. The isolated real-core test exercised 36 HTTP requests and 24 SOCKS5 UDP cases with both combined and domain-only configurations in global, rule and direct modes. A separate browser-like executable reached the dedicated chain for the apex and login subdomain; `notexample.test` did not match `example.test`. The selected application still used its process fallback for unrelated destinations, while matching domain requests selected the domain rule first. The servers observed 21 entry connections, 21 exit connections, seven normal GLOBAL connections and eight direct HTTP connections. Only the six expected unselected direct UDP packets reached the target; matched HTTP-exit UDP stayed blocked. These results verify rule semantics and routing in the actual bundled Mihomo, without performing a real third-party OAuth login.
 
 Strict workspace Clippy with all targets and features passed. Knip still reports only the pre-existing upstream `readLegacyTestUrls` export; no dependency or lock files were changed for domain routing.
+
+The [Windows x64 build](https://github.com/dyglcc/clash-verge-rev/actions/runs/39438448264/job/118681623885) passed using source `1db4d510052c18843859a50e9a51bcd170061e13`. The downloaded NSIS installer matched its CI checksum and local checksum file. [Transfer run 39443807966](https://github.com/dyglcc/clash-verge-rev/actions/runs/39443807966) checked the expected hash before uploading it and a checksum file to the release draft. GitHub's stored installer digest and the uploaded checksum contents matched before publication.
+
+```text
+Clash.Verge_2.5.8+deploytest.1020.1db4d51_x64-setup.exe
+59,875,175 bytes
+SHA-256: 6715e42751a3268211d727bf2ffdec123aff13cf5253e59b5ea4e77757f510be
+```
+
+The Windows installer and checksum are available in [Release dedicated-line-v2.5.8.3](https://github.com/dyglcc/clash-verge-rev/releases/tag/dedicated-line-v2.5.8.3), published on 2026-10-20 as a custom-fork prerelease with its tag pinned to that source. Installation and real Bookmap/browser login testing are left to the user as requested.
+
+There is no Mac installer for this domain feature in that release. The initial [Mac job](https://github.com/dyglcc/clash-verge-rev/actions/runs/39438448264/job/118681624318) and separate [retry](https://github.com/dyglcc/clash-verge-rev/actions/runs/39440908255/job/118690169808) were both cancelled by GitHub before acquiring a runner. Their annotations report hosted macOS ARM64 capacity constraints; neither job compiled or validated the update. The earlier Mac installer in `dedicated-line-v2.5.8.2` contains application routing only.
