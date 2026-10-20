@@ -198,6 +198,15 @@ const DedicatedLinePage = () => {
           { id: `select-proxy-node:${cfg.group}`, errorNotice: false },
         )
       }
+      if (
+        connected &&
+        applicationOnly !== (previous?.scope === 'applications')
+      ) {
+        await mutate(() => closeAllConnections(), {
+          id: 'close-all-connections',
+          errorNotice: false,
+        })
+      }
       await refresh()
       setForm(cfg)
       showNotice.success(
