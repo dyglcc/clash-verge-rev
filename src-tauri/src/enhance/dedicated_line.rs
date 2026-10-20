@@ -17,7 +17,7 @@ pub fn verification_port(config: &Mapping) -> Option<u16> {
 pub const DEFAULT_EXIT_NAME: &str = "专线出口";
 
 /// Rebuilds the saved chain after subscription enhancements on startup and reload.
-/// Application scope keeps normal selector choices and uses a separate verification inbound.
+/// Selective routing keeps normal selector choices and uses a separate verification inbound.
 pub async fn apply_dedicated_line(config: Mapping) -> Result<Mapping> {
     let dl = Config::verge().await.latest_arc().dedicated_line.clone();
     let Some(dl) = dl else {
@@ -138,7 +138,7 @@ fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping
     inject_proxy(&mut config, &exit_name, exit_proxy);
 
     if dl.targets_applications() {
-        apply_application_rules(&mut config, dl, &exit_name)?;
+        apply_routing_rules(&mut config, dl, &exit_name)?;
     } else {
         add_to_group(&mut config, &group, &exit_name);
         if group != "GLOBAL" {
@@ -154,15 +154,44 @@ fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping
     Ok(config)
 }
 
-fn apply_application_rules(config: &mut Mapping, dl: &DedicatedLineConfig, exit_name: &str) -> Result<()> {
+fn normalize_domain(domain: &str) -> Result<String> {
+    let domain = domain.trim();
+    let domain = domain.strip_suffix('.').unwrap_or(domain).to_ascii_lowercase();
+    if domain.len() > 253
+        || !domain.contains('.')
+        || !domain.bytes().any(|byte| byte.is_ascii_alphabetic())
+        || domain.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                || !label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        bail!("Dedicated line domains must be DNS names without URLs, IP addresses or wildcards");
+    }
+    Ok(domain)
+}
+
+fn apply_routing_rules(config: &mut Mapping, dl: &DedicatedLineConfig, exit_name: &str) -> Result<()> {
+    let domains = dl.domains.as_deref().unwrap_or_default();
     let applications = dl.applications.as_deref().unwrap_or_default();
-    if applications.is_empty() {
-        bail!("Select at least one application for the dedicated line");
+    if domains.is_empty() && applications.is_empty() {
+        bail!("Select at least one domain or application for the dedicated line");
     }
     if exit_name.contains([',', '\r', '\n']) {
         bail!("Dedicated line name cannot contain commas or newlines");
     }
     let mut rules = Vec::new();
+    let mut seen_domains = std::collections::HashSet::new();
+    for domain in domains {
+        let domain = normalize_domain(domain)?;
+        if seen_domains.insert(domain.clone()) {
+            rules.push(Value::from(format!("DOMAIN-SUFFIX,{domain},{exit_name}")));
+            // Unsupported UDP must not escape through a process or ordinary fallback rule.
+            rules.push(Value::from(format!("DOMAIN-SUFFIX,{domain},REJECT")));
+        }
+    }
     for application in applications {
         let path = application.path.trim();
         if path.is_empty() || path.contains([',', '\r', '\n']) {
@@ -193,7 +222,9 @@ fn apply_application_rules(config: &mut Mapping, dl: &DedicatedLineConfig, exit_
         mode => bail!("Unsupported proxy mode: {mode}"),
     }
     config.insert("mode".into(), "rule".into());
-    config.insert("find-process-mode".into(), "always".into());
+    if !applications.is_empty() {
+        config.insert("find-process-mode".into(), "always".into());
+    }
     config.insert("rules".into(), rules.into());
     Ok(())
 }
@@ -300,6 +331,16 @@ mod tests {
         assert_eq!(config["proxies"][0], original["proxies"][0]);
         assert_eq!(config["proxies"][1]["dialer-proxy"].as_str(), Some("entry"));
         assert_eq!(
+            apply_config(
+                original.clone(),
+                &DedicatedLineConfig {
+                    domains: Some(vec!["https://ignored.example.com/path".into()]),
+                    ..dedicated_line()
+                }
+            )?,
+            config
+        );
+        assert_eq!(
             config["proxy-groups"][0]["proxies"][1].as_str(),
             Some(DEFAULT_EXIT_NAME)
         );
@@ -377,7 +418,106 @@ mod tests {
     }
 
     #[test]
-    fn application_routing_requires_a_nonempty_safe_application_list() -> Result<()> {
+    fn domain_only_routing_preserves_each_modes_unselected_traffic() -> Result<()> {
+        use crate::config::DedicatedLineScope;
+        let line = DedicatedLineConfig {
+            scope: Some(DedicatedLineScope::Applications),
+            domains: Some(vec![" Login.Example.COM. ".into(), "login.example.com".into()]),
+            ..dedicated_line()
+        };
+        for mode in ["rule", "global", "direct"] {
+            let mut original = source()?;
+            original.insert("mode".into(), mode.into());
+            let config = apply_config(original.clone(), &line)?;
+            assert_eq!(config["mode"], Value::from("rule"));
+            assert!(!config.contains_key("find-process-mode"));
+            assert_eq!(
+                config["rules"][0],
+                Value::from("DOMAIN-SUFFIX,login.example.com,专线出口")
+            );
+            assert_eq!(
+                config["rules"][1],
+                Value::from("DOMAIN-SUFFIX,login.example.com,REJECT")
+            );
+            let fallback = match mode {
+                "global" => "MATCH,GLOBAL",
+                "direct" => "MATCH,DIRECT",
+                _ => "MATCH,manual",
+            };
+            assert_eq!(config["rules"][2], Value::from(fallback));
+            if mode == "global" {
+                assert_eq!(config["rules"][3], Value::from("MATCH,REJECT"));
+            }
+            assert_eq!(config["proxy-groups"], original["proxy-groups"]);
+            assert_eq!(config["proxies"][1]["dialer-proxy"], Value::from("entry"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn domain_routing_precedes_application_fallback_and_rejects_unsafe_domains() -> Result<()> {
+        use crate::config::{DedicatedLineApplication, DedicatedLineScope};
+        let mut line = DedicatedLineConfig {
+            scope: Some(DedicatedLineScope::Applications),
+            domains: Some(vec!["example.com".into()]),
+            applications: Some(vec![DedicatedLineApplication {
+                name: "Bookmap".into(),
+                path: r"C:\Bookmap\Bookmap.exe".into(),
+            }]),
+            ..dedicated_line()
+        };
+        let config = apply_config(source()?, &line)?;
+        assert_eq!(
+            config["rules"],
+            Value::Sequence(vec![
+                "DOMAIN-SUFFIX,example.com,专线出口".into(),
+                "DOMAIN-SUFFIX,example.com,REJECT".into(),
+                r"PROCESS-PATH,C:\Bookmap\Bookmap.exe,专线出口".into(),
+                r"PROCESS-PATH,C:\Bookmap\Bookmap.exe,REJECT".into(),
+                "MATCH,manual".into(),
+            ])
+        );
+        assert_eq!(config["find-process-mode"], Value::from("always"));
+        for domain in [
+            "",
+            "localhost",
+            "https://example.com",
+            "example.com/path",
+            "example.com:443",
+            "*.example.com",
+            "example.com,another-rule",
+            "example.com\nMATCH,DIRECT",
+            "127.0.0.1",
+            "999.999.999.999",
+            "[::1]",
+            "-example.com",
+            "example-.com",
+            "example..com",
+            "example.com..",
+            "under_score.example.com",
+        ] {
+            line.domains = Some(vec![domain.into()]);
+            assert!(
+                apply_config(source()?, &line).is_err(),
+                "accepted invalid domain: {domain}"
+            );
+        }
+        let long_label = format!("{}.example.com", "a".repeat(64));
+        assert!(normalize_domain(&long_label).is_err());
+        let long_domain = format!(
+            "{}.{}.{}.{}.com",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(63)
+        );
+        assert!(normalize_domain(&long_domain).is_err());
+        assert_eq!(normalize_domain("XN--FSQU00A.XN--0ZWM56D")?, "xn--fsqu00a.xn--0zwm56d");
+        Ok(())
+    }
+
+    #[test]
+    fn selective_routing_requires_a_nonempty_safe_target_list() -> Result<()> {
         use crate::config::{DedicatedLineApplication, DedicatedLineScope};
         let mut line = DedicatedLineConfig {
             scope: Some(DedicatedLineScope::Applications),

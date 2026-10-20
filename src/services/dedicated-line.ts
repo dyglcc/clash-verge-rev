@@ -2,6 +2,30 @@ import type { ProxyViewV1 } from '@/types/proxy-view'
 
 import type { DedicatedLineApplication } from './cmds'
 
+export function normalizeDedicatedLineDomains(domains: string[]): string[] {
+  const normalized = new Set<string>()
+  for (const input of domains) {
+    const domain = input.trim().toLowerCase().replace(/\.$/, '')
+    if (!domain) {
+      if (input.trim()) throw new Error('Invalid dedicated-line domain')
+      continue
+    }
+    const labels = domain.split('.')
+    if (
+      domain.length > 253 ||
+      labels.length < 2 ||
+      !/[a-z]/.test(domain) ||
+      labels.some(
+        (label) =>
+          label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+      )
+    )
+      throw new Error('Invalid dedicated-line domain')
+    normalized.add(domain)
+  }
+  return [...normalized]
+}
+
 export function mergeDedicatedLineApplications(
   current: DedicatedLineApplication[],
   additions: DedicatedLineApplication[],

@@ -243,6 +243,7 @@ pub struct DedicatedLineConfig {
     /// 跳过证书校验（http/tls 类）
     pub skip_cert_verify: Option<bool>,
     pub scope: Option<DedicatedLineScope>,
+    pub domains: Option<Vec<String>>,
     pub applications: Option<Vec<DedicatedLineApplication>>,
 }
 

@@ -949,6 +949,7 @@ interface IVergeConfig {
   enable_external_controller?: boolean
   dedicated_line?: {
     scope?: 'all' | 'applications'
+    domains?: string[]
     applications?: { name: string; path: string }[]
     enabled?: boolean
     name?: string

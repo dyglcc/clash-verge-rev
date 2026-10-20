@@ -49,6 +49,7 @@ import {
 import {
   detectDedicatedLineEntry,
   mergeDedicatedLineApplications,
+  normalizeDedicatedLineDomains,
 } from '@/services/dedicated-line'
 import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
@@ -76,6 +77,7 @@ const DedicatedLinePage = () => {
     skip_cert_verify: false,
     enabled: false,
     scope: 'applications',
+    domains: [],
     applications: [],
   })
   const [loading, setLoading] = useState(true)
@@ -88,6 +90,24 @@ const DedicatedLinePage = () => {
 
   const connected = !!verge?.dedicated_line?.enabled
   const applicationOnly = form.scope === 'applications'
+  const requiresTun = applicationOnly && !!form.applications?.length
+  const connectedRequiresTun =
+    verge?.dedicated_line?.scope === 'applications' &&
+    !!verge.dedicated_line.applications?.length
+  const domainInput = useMemo(() => {
+    try {
+      return {
+        domains: normalizeDedicatedLineDomains(form.domains || []),
+        error: '',
+      }
+    } catch {
+      return {
+        domains: [],
+        error:
+          '请每行填写一个有效域名，不含网址前缀、路径、通配符或 IP；国际化域名请使用 Punycode。',
+      }
+    }
+  }, [form.domains])
   const refresh = () =>
     Promise.all([refreshProxy(), refreshClashConfig(), refreshRules()])
 
@@ -139,10 +159,15 @@ const DedicatedLinePage = () => {
     )
       return '请填写有效端口 (1-65535)'
     if (!['socks5', 'http'].includes(form.proxy_type ?? '')) return '请选择协议'
-    if (applicationOnly && !form.applications?.length)
-      return '请至少添加一个走专线的应用'
-    if (requireTun && applicationOnly && !verge?.enable_tun_mode)
-      return '请先开启虚拟网卡（TUN）模式，再启用应用专线'
+    if (applicationOnly && domainInput.error) return domainInput.error
+    if (
+      applicationOnly &&
+      !domainInput.domains.length &&
+      !form.applications?.length
+    )
+      return '请至少添加一个走专线的域名或应用'
+    if (requireTun && requiresTun && !verge?.enable_tun_mode)
+      return '应用进程兜底需要开启虚拟网卡（TUN）模式'
     if (
       applicationOnly &&
       form.applications?.some((application) => /[,\r\n]/.test(application.path))
@@ -162,6 +187,7 @@ const DedicatedLinePage = () => {
     try {
       const cfg = {
         ...form,
+        domains: applicationOnly ? domainInput.domains : form.domains,
         server: form.server?.trim(),
         name: form.name || EXIT_NAME,
         enabled: connected,
@@ -213,7 +239,7 @@ const DedicatedLinePage = () => {
       setForm(cfg)
       showNotice.success(
         applicationOnly
-          ? '设置已保存，请重启名单中的应用以切换已有连接'
+          ? '设置已保存，请重连目标应用或登录页面，使已有连接按新规则建立'
           : '专线配置已保存',
       )
     } catch (error: unknown) {
@@ -254,6 +280,7 @@ const DedicatedLinePage = () => {
     try {
       const cfg: DedicatedLineConfig = {
         ...form,
+        domains: applicationOnly ? domainInput.domains : form.domains,
         server: form.server?.trim(),
         name: form.name || EXIT_NAME,
         enabled: true,
@@ -283,7 +310,7 @@ const DedicatedLinePage = () => {
       await refresh()
       showNotice.success(
         applicationOnly
-          ? '应用专线已启用，请重启名单中的应用；其他应用沿用当前模式'
+          ? '域名与应用分流已启用，请重连已有连接；其他流量沿用当前模式'
           : `专线已连接（入口: ${detected.entry} → 出口: ${form.server}）`,
       )
     } catch (error: unknown) {
@@ -325,7 +352,7 @@ const DedicatedLinePage = () => {
       setForm(cfg)
       showNotice.success(
         saved?.scope === 'applications'
-          ? '应用专线已停用，请重启名单应用以结束已有专线连接'
+          ? '域名与应用分流已停用，请重连目标应用或浏览器以结束已有专线连接'
           : '专线已断开',
       )
     } catch (error: unknown) {
@@ -354,7 +381,7 @@ const DedicatedLinePage = () => {
       <Stack spacing={2} sx={{ maxWidth: 640, mx: 'auto' }}>
         <Alert severity="info">
           专线使用“入口节点 →
-          专线出口”的链式代理。选择“仅指定应用”后，只有名单中的应用走专线，其他应用继续遵循当前全局、规则或直连模式。设置会保存，重启
+          专线出口”的链式代理。选择“指定域名与应用”后，优先按域名走专线，应用名单作为兜底。其他流量继续遵循当前全局、规则或直连模式。设置会保存，重启
           Clash 后仍然有效。
         </Alert>
 
@@ -371,14 +398,14 @@ const DedicatedLinePage = () => {
             <Chip
               label={
                 connected
-                  ? applicationOnly && !verge?.enable_tun_mode
+                  ? connectedRequiresTun && !verge?.enable_tun_mode
                     ? '等待开启 TUN'
                     : '已连接'
                   : '未连接'
               }
               color={
                 connected
-                  ? applicationOnly && !verge?.enable_tun_mode
+                  ? connectedRequiresTun && !verge?.enable_tun_mode
                     ? 'warning'
                     : 'success'
                   : 'default'
@@ -422,13 +449,41 @@ const DedicatedLinePage = () => {
                 update({ scope: event.target.value as 'all' | 'applications' })
               }
             >
-              <MenuItem value="applications">仅指定应用</MenuItem>
+              <MenuItem value="applications">指定域名与应用</MenuItem>
               <MenuItem value="all">全部流量（原有方式）</MenuItem>
             </TextField>
             {applicationOnly && (
               <Stack spacing={1}>
+                <TextField
+                  label="优先走专线的域名"
+                  multiline
+                  minRows={3}
+                  fullWidth
+                  disabled={loading}
+                  placeholder={'example.com\nlogin.other-site.com'}
+                  value={(form.domains || []).join('\n')}
+                  error={!!domainInput.error}
+                  helperText={
+                    domainInput.error ||
+                    '每行一个域名，覆盖该域名及所有子域名。不填写 https://、路径或通配符。'
+                  }
+                  onChange={(event) =>
+                    update({ domains: event.target.value.split(/\r?\n/) })
+                  }
+                />
+                <Alert severity="info">
+                  指定域名在 Chrome
+                  等浏览器中也会走专线。第三方登录使用独立域名时需要另行添加，无需把整个
+                  Chrome 加入应用名单。
+                </Alert>
+                <Typography variant="subtitle2">应用兜底（可选）</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  域名未命中时，名单中的应用仍走专线，包括直接连接 IP 的请求。
+                </Typography>
                 <Alert
-                  severity={verge?.enable_tun_mode ? 'info' : 'warning'}
+                  severity={
+                    requiresTun && !verge?.enable_tun_mode ? 'warning' : 'info'
+                  }
                   action={
                     !verge?.enable_tun_mode && (
                       <Button
@@ -451,8 +506,10 @@ const DedicatedLinePage = () => {
                   }
                 >
                   {verge?.enable_tun_mode
-                    ? '保存并连接后，请重启目标应用，使其已有连接按新设置建立。'
-                    : '应用分流需要开启虚拟网卡（TUN）模式。未开启时，无法接管不使用系统代理的应用。'}
+                    ? '设置只影响新连接；保存并连接后，请重连目标应用和登录页面。'
+                    : requiresTun
+                      ? '应用进程兜底需要开启虚拟网卡（TUN）模式，才能接管不使用系统代理的应用。'
+                      : '仅按域名分流可使用系统代理。未经过 Clash 的请求无法接管；需要应用进程兜底时请开启 TUN。'}
                 </Alert>
                 {(form.applications || []).map((application) => (
                   <Box
@@ -485,14 +542,16 @@ const DedicatedLinePage = () => {
                   </Box>
                 ))}
                 {!form.applications?.length && (
-                  <Typography color="text.secondary">尚未添加应用。</Typography>
+                  <Typography color="text.secondary">
+                    尚未添加兜底应用，可仅使用域名分流。
+                  </Typography>
                 )}
                 <Button
                   startIcon={<AddRounded />}
                   disabled={loading}
                   onClick={() => setApplicationPickerOpen(true)}
                 >
-                  添加应用
+                  添加兜底应用
                 </Button>
               </Stack>
             )}
@@ -654,7 +713,7 @@ const DedicatedLinePage = () => {
             </Box>
             {applicationOnly && (
               <Typography variant="body2" sx={{ mt: 1.5 }}>
-                链路验证不代表目标应用已命中名单。请重启目标应用，并在“连接”页核对进程路径和代理链。
+                链路验证不代表目标请求已命中名单。请重连目标应用或登录页面，并在“连接”页核对域名、进程路径和代理链。
               </Typography>
             )}
           </DialogContentText>
