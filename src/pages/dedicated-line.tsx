@@ -3,6 +3,8 @@ import {
   LinkRounded,
   NetworkCheckRounded,
   SaveRounded,
+  AddRounded,
+  DeleteOutlineRounded,
 } from '@mui/icons-material'
 import {
   Alert,
@@ -20,6 +22,7 @@ import {
   Stack,
   TextField,
   Typography,
+  IconButton,
 } from '@mui/material'
 import { useLockFn } from 'ahooks'
 import { useEffect, useMemo, useState } from 'react'
@@ -29,6 +32,7 @@ import {
 } from 'tauri-plugin-mihomo-api'
 
 import { BasePage } from '@/components/base'
+import { DedicatedLineApplicationPicker } from '@/components/dedicated-line/application-picker'
 import { useVerge } from '@/hooks/use-verge'
 import {
   useAppRefreshers,
@@ -42,9 +46,13 @@ import {
   recordSelectedNode,
   verifyDedicatedLineIp,
 } from '@/services/cmds'
-import { detectDedicatedLineEntry } from '@/services/dedicated-line'
+import {
+  detectDedicatedLineEntry,
+  mergeDedicatedLineApplications,
+} from '@/services/dedicated-line'
 import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
+import getSystem from '@/utils/get-system'
 
 // 注入到 proxies 的固定出口节点名（需与后端 enhance/dedicated_line.rs 的默认值一致）
 const EXIT_NAME = '专线出口'
@@ -52,9 +60,10 @@ const EXIT_NAME = '专线出口'
 const DedicatedLinePage = () => {
   const { proxyView } = useProxiesData()
   const { clashConfig } = useClashConfigData()
-  const { refreshProxy } = useAppRefreshers()
-  const { verge } = useVerge()
+  const { refreshProxy, refreshClashConfig, refreshRules } = useAppRefreshers()
+  const { verge, patchVerge } = useVerge()
   const [selectedGroup, setSelectedGroup] = useState('')
+  const [applicationPickerOpen, setApplicationPickerOpen] = useState(false)
 
   const [form, setForm] = useState<DedicatedLineConfig>({
     name: EXIT_NAME,
@@ -66,6 +75,8 @@ const DedicatedLinePage = () => {
     udp: true,
     skip_cert_verify: false,
     enabled: false,
+    scope: 'applications',
+    applications: [],
   })
   const [loading, setLoading] = useState(true)
   const [verifying, setVerifying] = useState(false)
@@ -76,6 +87,9 @@ const DedicatedLinePage = () => {
   }>({ open: false, ok: false, ip: '' })
 
   const connected = !!verge?.dedicated_line?.enabled
+  const applicationOnly = form.scope === 'applications'
+  const refresh = () =>
+    Promise.all([refreshProxy(), refreshClashConfig(), refreshRules()])
 
   // 载入已保存的专线配置
   useEffect(() => {
@@ -88,6 +102,7 @@ const DedicatedLinePage = () => {
             ...cfg,
             name: cfg.name || EXIT_NAME,
             proxy_type: cfg.proxy_type || 'socks5',
+            scope: cfg.scope || 'all',
           }))
         }
       })
@@ -102,8 +117,13 @@ const DedicatedLinePage = () => {
     [proxyView],
   )
   const detected = useMemo(
-    () => detectDedicatedLineEntry(proxyView, mode, selectedGroup),
-    [proxyView, mode, selectedGroup],
+    () =>
+      detectDedicatedLineEntry(
+        proxyView,
+        applicationOnly && mode === 'direct' ? 'rule' : mode,
+        selectedGroup,
+      ),
+    [proxyView, mode, selectedGroup, applicationOnly],
   )
 
   const update = (patch: Partial<DedicatedLineConfig>) =>
@@ -119,6 +139,13 @@ const DedicatedLinePage = () => {
     )
       return '请填写有效端口 (1-65535)'
     if (!['socks5', 'http'].includes(form.proxy_type ?? '')) return '请选择协议'
+    if (applicationOnly && !form.applications?.length)
+      return '请至少添加一个走专线的应用'
+    if (
+      applicationOnly &&
+      form.applications?.some((application) => /[,\r\n]/.test(application.path))
+    )
+      return '应用路径不能包含逗号或换行'
     return null
   }
 
@@ -142,9 +169,42 @@ const DedicatedLinePage = () => {
         revalidate: [['getVergeConfig']],
         errorNotice: false,
       })
-      await refreshProxy()
+      const previous = verge?.dedicated_line
+      if (
+        connected &&
+        applicationOnly &&
+        previous?.scope !== 'applications' &&
+        previous?.group &&
+        previous.entry_node
+      ) {
+        await mutate(
+          async () => {
+            await selectNodeForGroup(previous.group!, previous.entry_node!)
+            await recordSelectedNode(previous.group!, previous.entry_node!)
+          },
+          { id: `select-proxy-node:${previous.group}`, errorNotice: false },
+        )
+      } else if (
+        connected &&
+        !applicationOnly &&
+        previous?.scope === 'applications' &&
+        cfg.group
+      ) {
+        await mutate(
+          async () => {
+            await selectNodeForGroup(cfg.group!, cfg.name)
+            await recordSelectedNode(cfg.group!, cfg.name)
+          },
+          { id: `select-proxy-node:${cfg.group}`, errorNotice: false },
+        )
+      }
+      await refresh()
       setForm(cfg)
-      showNotice.success('专线配置已保存')
+      showNotice.success(
+        applicationOnly
+          ? '设置已保存，请重启名单中的应用以切换已有连接'
+          : '专线配置已保存',
+      )
     } catch (error: unknown) {
       showNotice.error(error)
     } finally {
@@ -161,6 +221,10 @@ const DedicatedLinePage = () => {
     }
     if (!detected?.entry) {
       showNotice.error('未检测到入口节点，请先在「代理」页选好一个节点')
+      return
+    }
+    if (applicationOnly && !verge?.enable_tun_mode) {
+      showNotice.error('请先开启虚拟网卡（TUN）模式，再连接应用专线')
       return
     }
     if (localStorage.getItem('proxy-chain-mode-enabled') === 'true') {
@@ -196,21 +260,24 @@ const DedicatedLinePage = () => {
         errorNotice: false,
       })
       setForm(cfg)
-      // 选中专线出口
-      await mutate(
-        async () => {
-          await selectNodeForGroup(detected.group, cfg.name || EXIT_NAME)
-          await recordSelectedNode(detected.group, cfg.name || EXIT_NAME)
-        },
-        { id: `select-proxy-node:${detected.group}`, errorNotice: false },
-      )
-      await mutate(() => closeAllConnections(), {
-        id: 'close-all-connections',
-        errorNotice: false,
-      })
-      await refreshProxy()
+      if (!applicationOnly) {
+        await mutate(
+          async () => {
+            await selectNodeForGroup(detected.group, cfg.name || EXIT_NAME)
+            await recordSelectedNode(detected.group, cfg.name || EXIT_NAME)
+          },
+          { id: `select-proxy-node:${detected.group}`, errorNotice: false },
+        )
+        await mutate(() => closeAllConnections(), {
+          id: 'close-all-connections',
+          errorNotice: false,
+        })
+      }
+      await refresh()
       showNotice.success(
-        `专线已连接（入口: ${detected.entry} → 出口: ${form.server}）`,
+        applicationOnly
+          ? '应用专线已启用，请重启名单中的应用；其他应用沿用当前模式'
+          : `专线已连接（入口: ${detected.entry} → 出口: ${form.server}）`,
       )
     } catch (error: unknown) {
       showNotice.error(error)
@@ -233,7 +300,7 @@ const DedicatedLinePage = () => {
         errorNotice: false,
       })
       setForm((previous) => ({ ...previous, enabled: false }))
-      if (entry) {
+      if (entry && saved?.scope !== 'applications') {
         await mutate(
           async () => {
             await selectNodeForGroup(group, entry)
@@ -242,13 +309,18 @@ const DedicatedLinePage = () => {
           { id: `select-proxy-node:${group}`, errorNotice: false },
         )
       }
-      await mutate(() => closeAllConnections(), {
-        id: 'close-all-connections',
-        errorNotice: false,
-      })
-      await refreshProxy()
+      if (saved?.scope !== 'applications')
+        await mutate(() => closeAllConnections(), {
+          id: 'close-all-connections',
+          errorNotice: false,
+        })
+      await refresh()
       setForm(cfg)
-      showNotice.success('专线已断开')
+      showNotice.success(
+        saved?.scope === 'applications'
+          ? '应用专线已停用，请重启名单应用以结束已有专线连接'
+          : '专线已断开',
+      )
     } catch (error: unknown) {
       showNotice.error(error)
     } finally {
@@ -274,9 +346,9 @@ const DedicatedLinePage = () => {
     <BasePage title="专线代理">
       <Stack spacing={2} sx={{ maxWidth: 640, mx: 'auto' }}>
         <Alert severity="info">
-          专线代理是「链式代理」的简化封装：连接后，你在「代理」页选中的节点作为
-          <b>入口</b>，下面录入的专线 IP 作为<b>出口</b>
-          。一次录入长期保存，重启后保持， 直到你手动断开。
+          专线使用“入口节点 →
+          专线出口”的链式代理。选择“仅指定应用”后，只有名单中的应用走专线，其他应用继续遵循当前全局、规则或直连模式。设置会保存，重启
+          Clash 后仍然有效。
         </Alert>
 
         {/* 状态卡片 */}
@@ -300,8 +372,8 @@ const DedicatedLinePage = () => {
             color="text.secondary"
             sx={{ mt: 1, wordBreak: 'break-all' }}
           >
-            当前模式：{mode || '未知'} | 作用组：
-            {(connected ? form.group : detected?.group) || '—'}
+            当前模式：{mode || '未知'} | {applicationOnly ? '入口组' : '作用组'}
+            ：{(connected ? form.group : detected?.group) || '—'}
             <br />
             检测到的入口节点：
             {detected?.entry || '（未选择，请先到代理页选节点）'}
@@ -320,23 +392,109 @@ const DedicatedLinePage = () => {
             专线出口配置
           </Typography>
           <Stack spacing={2}>
-            {mode === 'rule' && groups.length > 0 && (
-              <TextField
-                label="作用代理组"
-                select
-                size="small"
-                fullWidth
-                disabled={loading || connected}
-                value={detected?.group || groups[0].name}
-                onChange={(event) => setSelectedGroup(event.target.value)}
-              >
-                {groups.map((group) => (
-                  <MenuItem key={group.name} value={group.name}>
-                    {group.name}
-                  </MenuItem>
+            <TextField
+              select
+              label="专线作用范围"
+              size="small"
+              fullWidth
+              value={form.scope || 'all'}
+              disabled={loading}
+              onChange={(event) =>
+                update({ scope: event.target.value as 'all' | 'applications' })
+              }
+            >
+              <MenuItem value="applications">仅指定应用</MenuItem>
+              <MenuItem value="all">全部流量（原有方式）</MenuItem>
+            </TextField>
+            {applicationOnly && (
+              <Stack spacing={1}>
+                <Alert
+                  severity={verge?.enable_tun_mode ? 'info' : 'warning'}
+                  action={
+                    !verge?.enable_tun_mode && (
+                      <Button
+                        disabled={loading}
+                        onClick={async () => {
+                          setLoading(true)
+                          try {
+                            await patchVerge({ enable_tun_mode: true })
+                            await refresh()
+                          } catch (error: unknown) {
+                            showNotice.error(error)
+                          } finally {
+                            setLoading(false)
+                          }
+                        }}
+                      >
+                        开启 TUN
+                      </Button>
+                    )
+                  }
+                >
+                  {verge?.enable_tun_mode
+                    ? '保存并连接后，请重启目标应用，使其已有连接按新设置建立。'
+                    : '应用分流需要开启虚拟网卡（TUN）模式。未开启时，无法接管不使用系统代理的应用。'}
+                </Alert>
+                {(form.applications || []).map((application) => (
+                  <Box
+                    key={application.path}
+                    sx={{ display: 'flex', alignItems: 'center', gap: 1 }}
+                  >
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography>{application.name}</Typography>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ wordBreak: 'break-all' }}
+                      >
+                        {application.path}
+                      </Typography>
+                    </Box>
+                    <IconButton
+                      aria-label={`移除 ${application.name}`}
+                      disabled={loading}
+                      onClick={() =>
+                        update({
+                          applications: form.applications?.filter(
+                            (item) => item.path !== application.path,
+                          ),
+                        })
+                      }
+                    >
+                      <DeleteOutlineRounded />
+                    </IconButton>
+                  </Box>
                 ))}
-              </TextField>
+                {!form.applications?.length && (
+                  <Typography color="text.secondary">尚未添加应用。</Typography>
+                )}
+                <Button
+                  startIcon={<AddRounded />}
+                  disabled={loading}
+                  onClick={() => setApplicationPickerOpen(true)}
+                >
+                  添加应用
+                </Button>
+              </Stack>
             )}
+            {(mode === 'rule' || (applicationOnly && mode === 'direct')) &&
+              groups.length > 0 && (
+                <TextField
+                  label={applicationOnly ? '入口代理组' : '作用代理组'}
+                  select
+                  size="small"
+                  fullWidth
+                  disabled={loading || connected}
+                  value={detected?.group || groups[0].name}
+                  onChange={(event) => setSelectedGroup(event.target.value)}
+                >
+                  {groups.map((group) => (
+                    <MenuItem key={group.name} value={group.name}>
+                      {group.name}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              )}
             <TextField
               label="协议"
               select
@@ -434,16 +592,32 @@ const DedicatedLinePage = () => {
         </Card>
       </Stack>
 
+      <DedicatedLineApplicationPicker
+        open={applicationPickerOpen}
+        onClose={() => setApplicationPickerOpen(false)}
+        onSelect={(applications) =>
+          update({
+            applications: mergeDedicatedLineApplications(
+              form.applications || [],
+              applications,
+              getSystem() === 'windows',
+            ),
+          })
+        }
+      />
+
       {/* 验证结果弹窗 */}
       <Dialog
         open={dialog.open}
         onClose={() => setDialog((d) => ({ ...d, open: false }))}
       >
-        <DialogTitle>{dialog.ok ? '🎉 验证成功' : '⚠️ 尚未生效'}</DialogTitle>
+        <DialogTitle>
+          {dialog.ok ? '专线链路验证成功' : '尚未检测到专线出口'}
+        </DialogTitle>
         <DialogContent>
           <DialogContentText component="div">
             {dialog.ok ? (
-              <>恭喜，专线 IP 配置成功！</>
+              <>已确认验证请求经过专线出口。</>
             ) : (
               <>当前出口 IP 还不是专线 IP。</>
             )}
@@ -452,6 +626,11 @@ const DedicatedLinePage = () => {
               <br />
               专线 IP：<b>{form.server || '—'}</b>
             </Box>
+            {applicationOnly && (
+              <Typography variant="body2" sx={{ mt: 1.5 }}>
+                链路验证不代表目标应用已命中名单。请重启目标应用，并在“连接”页核对进程路径和代理链。
+              </Typography>
+            )}
           </DialogContentText>
         </DialogContent>
         <DialogActions>

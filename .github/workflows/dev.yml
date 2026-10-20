@@ -24,7 +24,7 @@ on:
         type: boolean
         default: true
       publish_run_id:
-        description: 'Existing run containing a verified macos-aarch64 artifact'
+        description: 'Existing run containing a verified installer artifact'
         required: false
         type: string
       publish_release_tag:
@@ -32,9 +32,18 @@ on:
         required: false
         type: string
       publish_expected_sha256:
-        description: 'Verified DMG SHA-256 required when publishing an existing run'
+        description: 'Verified installer SHA-256 required when publishing an existing run'
         required: false
         type: string
+      publish_artifact_name:
+        description: 'Installer artifact to transfer to the draft release'
+        required: false
+        type: choice
+        default: macos-aarch64
+        options:
+          - macos-aarch64
+          - windows
+          - windows-arm64
 
 permissions: write-all
 env:
@@ -48,7 +57,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  publish_existing_macos:
+  publish_existing_installer:
     if: inputs.publish_release_tag != ''
     runs-on: ubuntu-latest
     permissions:
@@ -60,18 +69,20 @@ jobs:
       SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
       RELEASE_TAG: ${{ inputs.publish_release_tag }}
       EXPECTED_SHA256: ${{ inputs.publish_expected_sha256 }}
+      ARTIFACT_NAME: ${{ inputs.publish_artifact_name }}
     steps:
-      - name: Upload verified macOS artifact to draft release
+      - name: Upload verified installer artifact to draft release
         shell: bash
         run: |
           set -euo pipefail
           [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$RELEASE_TAG" =~ ^dedicated-line-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$ARTIFACT_NAME" == macos-aarch64 || "$ARTIFACT_NAME" == windows || "$ARTIFACT_NAME" == windows-arm64 ]]
           [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]]
-          gh run download "$SOURCE_RUN_ID" --name macos-aarch64 --dir package
+          gh run download "$SOURCE_RUN_ID" --name "$ARTIFACT_NAME" --dir package
           shopt -s nullglob
-          installers=(package/*.dmg)
+          installers=(package/*.dmg package/*.exe)
           [[ ${#installers[@]} -eq 1 ]]
           installer="${installers[0]}"
           printf '%s  %s\n' "$EXPECTED_SHA256" "$installer" | sha256sum --check -
@@ -241,12 +252,28 @@ jobs:
             target/${{ matrix.target }}/release/bundle/dmg/*.sha256
           if-no-files-found: error
 
+      - name: Hash Windows installer
+        if: matrix.os == 'windows-latest' && github.event.inputs[matrix.input] == 'true'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path 'target/${{ matrix.target }}/release/bundle/nsis/*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected one Windows installer' }
+          $installer = $installers[0]
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = $hash + '  ' + $installer.Name + [char]10
+          [IO.File]::WriteAllText($installer.FullName + '.sha256', $checksum, [Text.UTF8Encoding]::new($false))
+          Write-Output $checksum
+
       - name: Upload Artifacts (Windows)
         if: matrix.os == 'windows-latest' && github.event.inputs[matrix.input] == 'true'
         uses: actions/upload-artifact@v7
         with:
-          archive: false
-          path: target/${{ matrix.target }}/release/bundle/nsis/*.exe
+          name: ${{ matrix.id }}
+          archive: true
+          compression-level: 0
+          path: |
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            target/${{ matrix.target }}/release/bundle/nsis/*.sha256
           if-no-files-found: error
 
       - name: Upload Artifacts (Linux)

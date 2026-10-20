@@ -117,6 +117,14 @@ export async function updateProxyChainConfigInRuntime(proxyChainConfig: any) {
 
 export type DedicatedLineConfig = NonNullable<IVergeConfig['dedicated_line']>
 
+export type DedicatedLineApplication = NonNullable<
+  DedicatedLineConfig['applications']
+>[number]
+
+export async function getDedicatedLineProcesses() {
+  return invoke<DedicatedLineApplication[]>('get_dedicated_line_processes')
+}
+
 export async function getDedicatedLine() {
   return invoke<DedicatedLineConfig | null>('get_dedicated_line')
 }

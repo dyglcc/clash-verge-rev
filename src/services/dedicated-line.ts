@@ -1,5 +1,24 @@
 import type { ProxyViewV1 } from '@/types/proxy-view'
 
+import type { DedicatedLineApplication } from './cmds'
+
+export function mergeDedicatedLineApplications(
+  current: DedicatedLineApplication[],
+  additions: DedicatedLineApplication[],
+  windows: boolean,
+): DedicatedLineApplication[] {
+  const applications = new Map<string, DedicatedLineApplication>()
+  for (const application of [...current, ...additions]) {
+    const path = application.path.trim()
+    if (path)
+      applications.set(windows ? path.toLowerCase() : path, {
+        ...application,
+        path,
+      })
+  }
+  return [...applications.values()]
+}
+
 export function detectDedicatedLineEntry(
   view: ProxyViewV1 | undefined,
   mode: string | undefined,

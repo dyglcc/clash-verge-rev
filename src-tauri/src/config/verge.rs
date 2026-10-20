@@ -242,6 +242,27 @@ pub struct DedicatedLineConfig {
     pub udp: Option<bool>,
     /// 跳过证书校验（http/tls 类）
     pub skip_cert_verify: Option<bool>,
+    pub scope: Option<DedicatedLineScope>,
+    pub applications: Option<Vec<DedicatedLineApplication>>,
+}
+
+impl DedicatedLineConfig {
+    pub fn targets_applications(&self) -> bool {
+        self.scope == Some(DedicatedLineScope::Applications)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DedicatedLineScope {
+    All,
+    Applications,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DedicatedLineApplication {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]

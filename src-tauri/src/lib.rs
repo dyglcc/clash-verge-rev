@@ -187,6 +187,7 @@ mod app_init {
             cmd::get_verge_config,
             cmd::patch_verge_config,
             cmd::get_dedicated_line,
+            cmd::get_dedicated_line_processes,
             cmd::patch_dedicated_line,
             cmd::verify_dedicated_line_ip,
             cmd::test_delay,

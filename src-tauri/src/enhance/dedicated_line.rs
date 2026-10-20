@@ -3,25 +3,69 @@ use anyhow::{Result, bail};
 use clash_verge_logging::{Type, logging};
 use serde_yaml_ng::{Mapping, Value};
 
+pub const VERIFICATION_LISTENER: &str = "cvr-dedicated-line-verification";
+
+pub fn verification_port(config: &Mapping) -> Option<u16> {
+    config.get("listeners")?.as_sequence()?.iter().find_map(|listener| {
+        (listener.get("name")?.as_str()? == VERIFICATION_LISTENER)
+            .then(|| listener.get("port")?.as_u64()?.try_into().ok())
+            .flatten()
+    })
+}
+
 /// 默认的专线出口节点名
 pub const DEFAULT_EXIT_NAME: &str = "专线出口";
 
-/// 在配置生成管线末尾应用「专线代理」。
-///
-/// 当 `verge.dedicated_line.enabled == true` 时：
-/// 1. 向 `proxies` 注入专线出口节点（socks5 / http）；
-/// 2. 把出口加入目标组（以及 GLOBAL，保证可被选中）；
-/// 3. 在出口节点上设置 `dialer-proxy = entry_node`，形成 入口→出口 链路。
-///
-/// 因为本函数在每次 `enhance()`（启动、切订阅、改设置）都会执行，
-/// 故只要 `enabled` 仍为 true，重启后链路会自动重建。
+/// Rebuilds the saved chain after subscription enhancements on startup and reload.
+/// Application scope keeps normal selector choices and uses a separate verification inbound.
 pub async fn apply_dedicated_line(config: Mapping) -> Result<Mapping> {
     let dl = Config::verge().await.latest_arc().dedicated_line.clone();
     let Some(dl) = dl else {
         return Ok(config);
     };
 
-    apply_config(config, &dl)
+    let mut config = apply_config(config, &dl)?;
+    if dl.enabled == Some(true) && dl.targets_applications() {
+        let previous_port = Config::runtime()
+            .await
+            .latest_arc()
+            .config
+            .as_ref()
+            .and_then(verification_port);
+        let port = match previous_port {
+            Some(port) => port,
+            None => std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?
+                .local_addr()?
+                .port(),
+        };
+        let listeners = config
+            .entry(Value::from("listeners"))
+            .or_insert_with(|| Value::Sequence(vec![]));
+        let listeners = listeners
+            .as_sequence_mut()
+            .ok_or_else(|| anyhow::anyhow!("Invalid listeners configuration"))?;
+        if listeners
+            .iter()
+            .any(|listener| listener.get("name").and_then(Value::as_str) == Some(VERIFICATION_LISTENER))
+        {
+            bail!("Dedicated line verification listener name is already in use");
+        }
+        let mut listener = Mapping::new();
+        listener.insert("name".into(), VERIFICATION_LISTENER.into());
+        listener.insert("type".into(), "mixed".into());
+        listener.insert("listen".into(), "127.0.0.1".into());
+        listener.insert("port".into(), port.into());
+        listener.insert(
+            "proxy".into(),
+            dl.name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(DEFAULT_EXIT_NAME)
+                .into(),
+        );
+        listeners.push(listener.into());
+    }
+    Ok(config)
 }
 
 fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping> {
@@ -74,7 +118,8 @@ fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping
     {
         bail!("Dedicated line exit name conflicts with an existing proxy or group: {exit_name}");
     }
-    if group != "GLOBAL"
+    if !dl.targets_applications()
+        && group != "GLOBAL"
         && !config
             .get("proxy-groups")
             .and_then(Value::as_sequence)
@@ -92,10 +137,13 @@ fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping
     let exit_proxy = build_exit_proxy(dl, &exit_name, &proxy_type, &server, port, &entry_node);
     inject_proxy(&mut config, &exit_name, exit_proxy);
 
-    // 2) 加入目标组（以及 GLOBAL）
-    add_to_group(&mut config, &group, &exit_name);
-    if group != "GLOBAL" {
-        add_to_group(&mut config, "GLOBAL", &exit_name);
+    if dl.targets_applications() {
+        apply_application_rules(&mut config, dl, &exit_name)?;
+    } else {
+        add_to_group(&mut config, &group, &exit_name);
+        if group != "GLOBAL" {
+            add_to_group(&mut config, "GLOBAL", &exit_name);
+        }
     }
 
     logging!(
@@ -104,6 +152,45 @@ fn apply_config(mut config: Mapping, dl: &DedicatedLineConfig) -> Result<Mapping
         "专线代理已注入：出口={exit_name} 入口={entry_node} 组={group}"
     );
     Ok(config)
+}
+
+fn apply_application_rules(config: &mut Mapping, dl: &DedicatedLineConfig, exit_name: &str) -> Result<()> {
+    let applications = dl.applications.as_deref().unwrap_or_default();
+    if applications.is_empty() {
+        bail!("Select at least one application for the dedicated line");
+    }
+    if exit_name.contains([',', '\r', '\n']) {
+        bail!("Dedicated line name cannot contain commas or newlines");
+    }
+    let mut rules = Vec::new();
+    for application in applications {
+        let path = application.path.trim();
+        if path.is_empty() || path.contains([',', '\r', '\n']) {
+            bail!("Application paths must be nonempty and cannot contain commas or newlines");
+        }
+        rules.push(Value::from(format!("PROCESS-PATH,{path},{exit_name}")));
+    }
+    // Native global/direct modes bypass process rules, so preserve their fallback in rule mode.
+    match config
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("rule")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "global" => rules.push("MATCH,GLOBAL".into()),
+        "direct" => rules.push("MATCH,DIRECT".into()),
+        "rule" => {
+            if let Some(existing) = config.get("rules").and_then(Value::as_sequence) {
+                rules.extend(existing.iter().cloned());
+            }
+        }
+        mode => bail!("Unsupported proxy mode: {mode}"),
+    }
+    config.insert("mode".into(), "rule".into());
+    config.insert("find-process-mode".into(), "always".into());
+    config.insert("rules".into(), rules.into());
+    Ok(())
 }
 
 /// 构造专线出口代理节点（mihomo proxy 定义）
@@ -231,6 +318,65 @@ mod tests {
             ..dedicated_line()
         };
         assert!(apply_config(source()?, &cycle).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn application_routing_preserves_each_modes_unselected_traffic() -> Result<()> {
+        use crate::config::{DedicatedLineApplication, DedicatedLineScope};
+        let line = DedicatedLineConfig {
+            scope: Some(DedicatedLineScope::Applications),
+            applications: Some(vec![DedicatedLineApplication {
+                name: "Bookmap".into(),
+                path: r"C:\Bookmap\jre\bin\javaw.exe".into(),
+            }]),
+            ..dedicated_line()
+        };
+        for mode in ["rule", "global", "direct"] {
+            let mut original = source()?;
+            original.insert("mode".into(), mode.into());
+            let config = apply_config(original.clone(), &line)?;
+            assert_eq!(config["mode"], Value::from("rule"));
+            assert_eq!(config["find-process-mode"], Value::from("always"));
+            assert_eq!(
+                config["rules"][0],
+                Value::from(r"PROCESS-PATH,C:\Bookmap\jre\bin\javaw.exe,专线出口")
+            );
+            let fallback = match mode {
+                "global" => "MATCH,GLOBAL",
+                "direct" => "MATCH,DIRECT",
+                _ => "MATCH,manual",
+            };
+            assert_eq!(config["rules"][1], Value::from(fallback));
+            assert_eq!(config["proxy-groups"], original["proxy-groups"]);
+            assert_eq!(config["proxies"][1]["dialer-proxy"], Value::from("entry"));
+        }
+        assert_eq!(
+            apply_config(
+                source()?,
+                &DedicatedLineConfig {
+                    enabled: Some(false),
+                    ..line
+                }
+            )?,
+            source()?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn application_routing_requires_a_nonempty_safe_application_list() -> Result<()> {
+        use crate::config::{DedicatedLineApplication, DedicatedLineScope};
+        let mut line = DedicatedLineConfig {
+            scope: Some(DedicatedLineScope::Applications),
+            ..dedicated_line()
+        };
+        assert!(apply_config(source()?, &line).is_err());
+        line.applications = Some(vec![DedicatedLineApplication {
+            name: "invalid".into(),
+            path: "C:\\app,another.exe".into(),
+        }]);
+        assert!(apply_config(source()?, &line).is_err());
         Ok(())
     }
 }

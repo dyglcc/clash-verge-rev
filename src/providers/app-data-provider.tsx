@@ -5,7 +5,7 @@ import {
   getRules,
 } from 'tauri-plugin-mihomo-api'
 
-import { useClashInfo, useRuntimeConfig } from '@/hooks/use-clash'
+import { useClashInfo, useClashMode, useRuntimeConfig } from '@/hooks/use-clash'
 import { useVerge } from '@/hooks/use-verge'
 import { getProxyView, getSystemProxy } from '@/services/cmds'
 import { useQuery } from '@/services/query-client'
@@ -51,6 +51,7 @@ export const AppDataProvider = ({
   const { verge } = useVerge()
   const { data: runtimeConfig } = useRuntimeConfig()
   const { clashInfo } = useClashInfo()
+  const { data: savedMode, refetch: refetchSavedMode } = useClashMode()
 
   const {
     data: proxyView,
@@ -66,7 +67,7 @@ export const AppDataProvider = ({
   })
 
   const {
-    data: clashConfig,
+    data: liveClashConfig,
     isPending: isClashConfigPending,
     refetch: _refetchClashConfig,
   } = useQuery({
@@ -74,6 +75,18 @@ export const AppDataProvider = ({
     queryFn: getBaseConfig,
     ...TQ_MIHOMO,
   })
+
+  const clashConfig = useMemo<typeof liveClashConfig>(() => {
+    const line = verge?.dedicated_line
+    if (
+      liveClashConfig &&
+      line?.enabled &&
+      line.scope === 'applications' &&
+      (savedMode === 'global' || savedMode === 'rule' || savedMode === 'direct')
+    )
+      return { ...liveClashConfig, mode: savedMode }
+    return liveClashConfig
+  }, [liveClashConfig, savedMode, verge?.dedicated_line])
 
   const { data: ruleProviders, refetch: _refetchRuleProviders } = useQuery({
     queryKey: ['getRuleProviders'],
@@ -100,7 +113,9 @@ export const AppDataProvider = ({
   const runningMode = runState?.mode
 
   const refreshProxy = useStableFn(_refetchProxyView)
-  const refreshClashConfig = useStableFn(_refetchClashConfig)
+  const refreshClashConfig = useStableFn(() =>
+    Promise.all([_refetchClashConfig(), refetchSavedMode()]),
+  )
   const refreshRules = useStableFn(_refetchRules)
   const refreshSysproxy = useStableFn(_refetchSysproxy)
   const refreshRuleProviders = useStableFn(_refetchRuleProviders)

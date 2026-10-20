@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import type { ProxyGroupView, ProxyViewV1 } from '@/types/proxy-view'
 
-import { detectDedicatedLineEntry } from './dedicated-line'
+import {
+  detectDedicatedLineEntry,
+  mergeDedicatedLineApplications,
+} from './dedicated-line'
 
 const group = (name: string, now: string, type = 'Selector') =>
   ({ name, now, type }) as ProxyGroupView
@@ -40,5 +43,22 @@ describe('dedicated line entry selection', () => {
         '',
       ),
     ).toBeNull()
+  })
+
+  it('deduplicates Windows executable paths without merging different Java installations', () => {
+    const current = [{ name: 'Bookmap', path: 'C:\\Bookmap\\javaw.exe' }]
+    const additions = [
+      { name: 'javaw.exe', path: 'c:\\bookmap\\javaw.exe' },
+      { name: 'Other Java app', path: 'C:\\Other\\javaw.exe' },
+    ]
+    expect(
+      mergeDedicatedLineApplications(current, additions, true),
+    ).toHaveLength(2)
+    expect(
+      mergeDedicatedLineApplications(current, additions, false),
+    ).toHaveLength(3)
+    expect(current).toEqual([
+      { name: 'Bookmap', path: 'C:\\Bookmap\\javaw.exe' },
+    ])
   })
 })

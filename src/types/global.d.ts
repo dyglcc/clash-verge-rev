@@ -948,6 +948,8 @@ interface IVergeConfig {
   hover_jump_navigator_delay?: number
   enable_external_controller?: boolean
   dedicated_line?: {
+    scope?: 'all' | 'applications'
+    applications?: { name: string; path: string }[]
     enabled?: boolean
     name?: string
     proxy_type?: string

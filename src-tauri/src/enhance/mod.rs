@@ -1,6 +1,6 @@
 use crate::core::notify::NoticeStatus;
 mod chain;
-mod dedicated_line;
+pub(crate) mod dedicated_line;
 pub mod field;
 mod merge;
 mod script;

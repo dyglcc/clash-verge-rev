@@ -1045,16 +1045,24 @@ fn activate_selected_nodes_with(repair: SelectionRepair) -> tokio::sync::oneshot
                 && line.enabled == Some(true)
                 && let Some(group) = &line.group
             {
-                selected.retain(|selection| selection.name.as_ref() != Some(group));
-                selected.push(PrfSelected {
-                    name: Some(group.clone()),
-                    now: Some(
-                        line.name
-                            .clone()
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_else(|| "专线出口".into()),
-                    ),
-                });
+                let exit = line
+                    .name
+                    .clone()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "专线出口".into());
+                if line.targets_applications() {
+                    for selection in &mut selected {
+                        if selection.now.as_ref() == Some(&exit) {
+                            selection.now = line.entry_node.clone();
+                        }
+                    }
+                } else {
+                    selected.retain(|selection| selection.name.as_ref() != Some(group));
+                    selected.push(PrfSelected {
+                        name: Some(group.clone()),
+                        now: Some(exit),
+                    });
+                }
             }
 
             if selected.is_empty() {

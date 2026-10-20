@@ -94,6 +94,21 @@ fn after_change_clash_mode() {
 pub async fn change_clash_mode(mode: String) -> Result<(), String> {
     let mut mapping = Mapping::new();
     mapping.insert(Value::from("mode"), Value::from(mode.as_str()));
+    let application_routing = Config::verge()
+        .await
+        .data_arc()
+        .dedicated_line
+        .as_ref()
+        .is_some_and(|line| line.enabled == Some(true) && line.targets_applications());
+    if application_routing {
+        super::patch_clash(&mapping)
+            .await
+            .map_err(|error| String::from(format!("{error:#}")))?;
+        if Config::verge().await.data_arc().auto_close_connection.unwrap_or(false) {
+            after_change_clash_mode();
+        }
+        return Ok(());
+    }
     let json_value = serde_json::json!({
         "mode": mode
     });

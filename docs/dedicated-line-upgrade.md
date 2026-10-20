@@ -52,3 +52,27 @@ SHA-256: e82432857c8bdc3465a9e68e5845468dea7b7e57b9cf56b1d79f3c089cb05770
 On the Mac, compare `shasum -a 256` for the downloaded DMG with this value before installation.
 
 The inherited updater endpoints still point at official upstream releases. Installing a future official update would replace the custom dedicated-line build; keep using this fork's builds while this feature is needed.
+
+## Application-specific routing added on 2026-10-20
+
+Choose "仅指定应用" in the dedicated-line page, add the actual executable from the Windows running-process list or the file browser, and enable TUN. Configure the normal entry and dedicated exit, then connect the dedicated line. Saving changes while connected applies the updated list. Restart the selected application so its existing connections are rebuilt; the operating system and Clash do not need to restart. Disabling application routing also requires restarting that application's existing dedicated connections to end them. Other applications' connections are not forcibly closed by these operations.
+
+Previously saved configurations retain the original "全部流量" scope until the user changes it. New configurations default to application scope. Applications are identified by full executable path, independently of PID, so the selection survives restarts. For Bookmap, select the executable that actually owns its network connections, often its bundled `javaw.exe`; selecting only a launcher does not select a separate Java child executable. Multiple applications sharing the exact same executable path cannot be distinguished by window title or Java arguments. Paths containing commas or newlines are rejected by the rule editor.
+
+Selected applications always use the saved entry-to-exit chain. Unselected traffic retains the user's chosen mode: the existing subscription rules in rule mode, the normal GLOBAL selector in global mode, and DIRECT in direct mode. Native Mihomo global/direct modes skip process rules, so this feature generates a rule-mode runtime with the appropriate fallback, while the frontend, saved configuration and tray retain the user's logical mode. Switching modes regenerates the configuration through the shared transaction pipeline. External dashboards should not override the core's runtime mode directly while application routing is active.
+
+The dedicated-line verification button uses a separate loopback listener pinned to the exit. Its result verifies the chain, independently of which applications are selected. Confirm a particular application's matching process and chain in the connections view after restarting it.
+
+On Windows, actual Mihomo `v1.19.32` was tested with two distinct client executables and isolated local proxy servers. The selected executable was restarted between cases, and the unselected client used a different executable path. No system proxy or TUN settings were changed by this test.
+
+| Chosen mode | Selected executable | Unselected executable | Verification request |
+| --- | --- | --- | --- |
+| Global | Entry then dedicated exit | Normal GLOBAL proxy | Entry then dedicated exit |
+| Rule | Entry then dedicated exit | Original IP-CIDR rule, DIRECT | Entry then dedicated exit |
+| Direct | Entry then dedicated exit | DIRECT | Entry then dedicated exit |
+
+The mock servers observed six entry connections, six dedicated-exit connections, one normal global-proxy connection and two direct target connections. All cases passed. This establishes process matching and two-hop routing through the real core; it does not establish Bookmap's executable choice or connectivity to the user's real dedicated server.
+
+Frontend type checking, the production build, linting and architecture checks passed; Vitest passed all 48 tests. All six dedicated-line backend tests passed, including the Windows process picker finding the test executable. Strict Clippy passed both the scoped check and the repository's all-target/all-feature pre-push check. The pre-push Knip check still reports only the existing, unchanged upstream `readLegacyTestUrls` export described above.
+
+Installer build results will be recorded after the new Windows and macOS ARM64 builds finish. Release `dedicated-line-v2.5.8.1` predates this application-list feature.
