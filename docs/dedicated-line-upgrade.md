@@ -71,10 +71,26 @@ On Windows, actual Mihomo `v1.19.32` was tested with two distinct client executa
 | Rule | Entry then dedicated exit | Original IP-CIDR rule, DIRECT | Entry then dedicated exit |
 | Direct | Entry then dedicated exit | DIRECT | Entry then dedicated exit |
 
-The mock servers observed six entry connections, six dedicated-exit connections, one normal global-proxy connection and two direct target connections. All cases passed. This establishes process matching and two-hop routing through the real core; it does not establish Bookmap's executable choice or connectivity to the user's real dedicated server.
+The mock servers observed six entry connections, six dedicated-exit connections, one normal global-proxy connection and two direct target connections. All cases passed, including a selected executable path containing Chinese characters and spaces. This establishes process matching and two-hop routing through the real core; it does not establish Bookmap's executable choice or connectivity to the user's real dedicated server.
 
 UDP was tested separately with a real SOCKS5 UDP association. Mihomo skips matched adapters that do not support UDP; without terminal rejection rules, an HTTP dedicated exit and an HTTP GLOBAL selector could fall through to DIRECT. This behavior was reproduced, then corrected with per-application rejection guards and a terminal global-mode rejection. The selected executable's UDP stayed blocked in all three modes; unselected UDP stayed blocked with an HTTP global proxy and followed the original direct routing in rule/direct modes. Only the two expected unselected direct UDP packets reached the local UDP server. Use UDP-capable SOCKS5 entry and exit servers when the selected application needs UDP.
 
 Frontend type checking, the production build, linting and architecture checks passed; Vitest passed all 48 tests. All six dedicated-line backend tests passed, including the Windows process picker finding the test executable. Strict Clippy passed both the scoped check and the repository's all-target/all-feature pre-push check. The pre-push Knip check still reports only the existing, unchanged upstream `readLegacyTestUrls` export described above.
 
-Installer build results will be recorded after the new Windows and macOS ARM64 builds finish. Release `dedicated-line-v2.5.8.1` predates this application-list feature.
+The [2026-10-20 installer build](https://github.com/dyglcc/clash-verge-rev/actions/runs/39410746629) uses source `4e9923518c05a82a82dc29d35959f54a59a87f26`. On the Apple Silicon runner, all 48 frontend tests and five platform-applicable dedicated-line backend tests passed. The final DMG passed verification of all seven ARM64 Mach-O executables, individual and outer app signatures, and startup of both packaged Mihomo cores. Its independent Windows download hash matched the CI checksum. [Transfer run 39413708116](https://github.com/dyglcc/clash-verge-rev/actions/runs/39413708116) verified the expected hash before attaching the DMG and checksum to the new release draft; GitHub's stored asset digest matched too.
+
+```text
+Clash.Verge_2.5.8+deploytest.1020.4e99235_aarch64.dmg
+80,631,618 bytes
+SHA-256: b59053761499659c613b8c541caba9c69f4bcf0c4e73da47f54fd8e0c2f511dd
+```
+
+The Windows x64 NSIS build and checksum generation also passed. The installer downloaded on Windows matched the CI checksum and its accompanying checksum file. [Transfer run 39414345968](https://github.com/dyglcc/clash-verge-rev/actions/runs/39414345968) verified the expected hash before attaching the installer and checksum to the same release draft. GitHub's stored installer digest and both uploaded checksum-file contents matched their expected values before publication.
+
+```text
+Clash.Verge_2.5.8+deploytest.1020.4e99235_x64-setup.exe
+59,873,233 bytes
+SHA-256: f3e5af9b4a4e2ba6279587cba2ccc6bcb7b995e6ac4e75670a0cebe82ef45af6
+```
+
+Both installers and checksum files are available in [Release dedicated-line-v2.5.8.2](https://github.com/dyglcc/clash-verge-rev/releases/tag/dedicated-line-v2.5.8.2), published on 2026-10-20 as a custom-fork prerelease. Its tag is pinned to the verified source above. The complete build and both transfer jobs passed. Physical M5 GUI startup and the user's real Bookmap/server combination remain hardware- and environment-dependent acceptance checks. Release `dedicated-line-v2.5.8.1` predates this application-list feature.
