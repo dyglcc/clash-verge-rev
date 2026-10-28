@@ -28,7 +28,7 @@ on:
         required: false
         type: string
       publish_release_tag:
-        description: 'Existing draft release tag for a dedicated-line build'
+        description: 'Existing release tag for a dedicated-line build'
         required: false
         type: string
       publish_expected_sha256:
@@ -36,7 +36,7 @@ on:
         required: false
         type: string
       publish_artifact_name:
-        description: 'Installer artifact to transfer to the draft release'
+        description: 'Installer artifact to transfer to the existing release'
         required: false
         type: choice
         default: macos-aarch64
@@ -71,7 +71,7 @@ jobs:
       EXPECTED_SHA256: ${{ inputs.publish_expected_sha256 }}
       ARTIFACT_NAME: ${{ inputs.publish_artifact_name }}
     steps:
-      - name: Upload verified installer artifact to draft release
+      - name: Upload verified installer artifact to existing release
         shell: bash
         run: |
           set -euo pipefail
@@ -79,7 +79,15 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^dedicated-line-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
           [[ "$ARTIFACT_NAME" == macos-aarch64 || "$ARTIFACT_NAME" == windows || "$ARTIFACT_NAME" == windows-arm64 ]]
-          [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == true ]]
+          release_is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          upload_options=()
+          if [[ "$release_is_draft" == true ]]; then
+            upload_options+=(--clobber)
+          else
+            [[ "$release_is_draft" == false ]]
+            [[ "$(gh run view "$SOURCE_RUN_ID" --json conclusion --jq .conclusion)" == success ]]
+            [[ "$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)" == "$(gh run view "$SOURCE_RUN_ID" --json headSha --jq .headSha)" ]]
+          fi
           gh run download "$SOURCE_RUN_ID" --name "$ARTIFACT_NAME" --dir package
           shopt -s nullglob
           installers=(package/*.dmg package/*.exe)
@@ -90,7 +98,7 @@ jobs:
           name="${name// /.}"
           checksum="package/$name.sha256"
           printf '%s  %s\n' "$EXPECTED_SHA256" "$name" > "$checksum"
-          gh release upload "$RELEASE_TAG" "$installer" "$checksum" --clobber
+          gh release upload "$RELEASE_TAG" "$installer" "$checksum" "${upload_options[@]}"
 
   dev:
     if: inputs.publish_release_tag == ''
