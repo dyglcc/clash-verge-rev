@@ -28,13 +28,14 @@ on:
         required: false
         type: string
       macos_runner:
-        description: 'Apple Silicon runner image'
+        description: 'macOS runner image for the ARM64 build'
         required: false
         type: choice
         default: macos-latest
         options:
           - macos-latest
           - macos-15
+          - macos-15-intel
       publish_run_id:
         description: 'Existing run containing a verified installer artifact'
         required: false
@@ -197,6 +198,30 @@ jobs:
           node-version: '24.21.0'
           cache: 'pnpm'
 
+      - name: Prepare static ARM64 verifier for Intel host
+        if: matrix.id == 'macos-aarch64' && inputs.macos_runner == 'macos-15-intel' && github.event.inputs[matrix.input] == 'true'
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'
+          import path from 'node:path'
+
+          if (process.platform !== 'darwin' || process.arch !== 'x64') {
+            throw new Error('Static ARM64 verification requires an Intel macOS host')
+          }
+          const source = fs.readFileSync('scripts/verify-macos-bundle.mjs', 'utf8').replace(/\r\n/g, '\n')
+          const nativeCheck = `    console.log(
+                execFileSync(core, ['-v'], { encoding: 'utf8', timeout: 15000 }).trim(),
+              )`
+          if (source.split(nativeCheck).length !== 2) {
+            throw new Error('Expected exactly one native core startup block')
+          }
+          const skippedCheck = '    console.log(`Skipped ${name} startup: ARM64 executable on Intel build host`)'
+          const verifier = path.join(process.env.RUNNER_TEMP, 'verify-macos-bundle-static.mjs')
+          fs.writeFileSync(verifier, source.replace(nativeCheck, skippedCheck))
+          fs.appendFileSync(process.env.GITHUB_ENV, `MACOS_BUNDLE_VERIFIER=${verifier}\n`)
+          JS
+
       - name: Pnpm Cache
         uses: actions/cache@v6
         with:
@@ -227,7 +252,7 @@ jobs:
           plutil -insert CFBundlePackageType -string APPL "$app/Contents/Info.plist"
           codesign --force --deep --sign - "$app"
           hdiutil create -volname VerifierFixture -srcfolder "$fixture" -format UDZO "$RUNNER_TEMP/cvr-verifier.dmg"
-          node scripts/verify-macos-bundle.mjs "$RUNNER_TEMP/cvr-verifier.dmg" arm64
+          node "${MACOS_BUNDLE_VERIFIER:-scripts/verify-macos-bundle.mjs}" "$RUNNER_TEMP/cvr-verifier.dmg" arm64
 
       - name: Pnpm install and check
         if: github.event.inputs[matrix.input] == 'true'
@@ -249,10 +274,18 @@ jobs:
 
       - name: Check dedicated line compatibility
         if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        shell: bash
+        env:
+          MACOS_RUNNER: ${{ inputs.macos_runner }}
         run: |
           pnpm web:build
           pnpm test
-          cargo test --locked --release --target ${{ matrix.target }} -p clash-verge --lib dedicated_line
+          test_options=()
+          if [[ "$MACOS_RUNNER" == macos-15-intel ]]; then
+            test_options+=(--no-run)
+            printf '%s\n' 'ARM64 tests compiled only; native backend tests and core startup checks are skipped on the Intel build host.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cargo test --locked --release --target ${{ matrix.target }} -p clash-verge --lib dedicated_line "${test_options[@]}"
 
       - name: Tauri build
         if: github.event.inputs[matrix.input] == 'true'
@@ -270,7 +303,7 @@ jobs:
         if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
         run: |
           for installer in target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
-            node scripts/verify-macos-bundle.mjs "$installer" arm64
+            node "${MACOS_BUNDLE_VERIFIER:-scripts/verify-macos-bundle.mjs}" "$installer" arm64
           done
 
       - name: Upload Artifacts (macOS)
