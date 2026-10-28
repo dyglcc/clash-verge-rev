@@ -23,6 +23,18 @@ on:
         required: false
         type: boolean
         default: true
+      build_ref:
+        description: 'Exact source commit SHA to build; defaults to the workflow commit'
+        required: false
+        type: string
+      macos_runner:
+        description: 'Apple Silicon runner image'
+        required: false
+        type: choice
+        default: macos-latest
+        options:
+          - macos-latest
+          - macos-15
       publish_run_id:
         description: 'Existing run containing a verified installer artifact'
         required: false
@@ -127,7 +139,7 @@ jobs:
             id: linux-amd64
             input: run_linux_amd64
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.id == 'macos-aarch64' && inputs.macos_runner || matrix.os }}
     steps:
       - name: Skip job if not selected
         if: github.event.inputs[matrix.input] != 'true'
@@ -136,6 +148,19 @@ jobs:
       - name: Checkout Repository
         if: github.event.inputs[matrix.input] == 'true'
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.build_ref || github.sha }}
+
+      - name: Verify build source
+        if: github.event.inputs[matrix.input] == 'true'
+        shell: bash
+        env:
+          BUILD_REF: ${{ inputs.build_ref || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_REF" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$BUILD_REF" ]]
+          printf 'Build source: `%s`\n' "$BUILD_REF" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Rust Stable
         if: github.event.inputs[matrix.input] == 'true'
@@ -147,7 +172,7 @@ jobs:
           save-if: ${{ github.event.inputs[matrix.input] == 'true' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feature/dedicated-line') }}
           cache-on-failure: true
           prefix-key: 'v1-rust'
-          key: 'rust-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
+          key: 'rust-shared-stable-${{ matrix.id == ''macos-aarch64'' && inputs.macos_runner || matrix.os }}-${{ matrix.target }}'
           workspaces: |
             . -> target
           cache-all-crates: true
@@ -249,7 +274,7 @@ jobs:
           done
 
       - name: Upload Artifacts (macOS)
-        if: ${{ !cancelled() && matrix.os == 'macos-latest' && github.event.inputs[matrix.input] == 'true' }}
+        if: ${{ !cancelled() && matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64
